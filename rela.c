@@ -1329,9 +1329,13 @@ static int parse(rela_vm* vm, char *source, int results, int mode) {
 			}
 
 			if (source[offset] == '(') {
-				offset += parse_arglist(vm, &source[offset]);
+				offset++;
+				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
 				arguments[argument++] = pop(vm).node;
 				arguments[argument-1]->results = 1;
+				offset += skip_gap(&source[offset]);
+				ensure(vm, source[offset] == ')', "expected closing paren: %s", source);
+				offset++;
 			}
 			else {
 				offset += parse_node(vm, &source[offset]);
