@@ -23,6 +23,10 @@
 #ifndef _rela_h
 #define _rela_h
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -31,33 +35,61 @@ struct _rela_vm;
 typedef struct _rela_vm rela_vm;
 
 // @return number of relevant stack items
-typedef size_t (*rela_callback)(rela_vm* rela);
+typedef void (*rela_callback)(rela_vm* rela);
+
+typedef struct {
+	const char* name;
+	rela_callback func;
+} rela_register;
 
 // Create a Rela VM, install callbacks and compile source code
 rela_vm* rela_create(
 	const char* source,
 	size_t memory,
-	size_t callbacks,
-	const char** callback_names,
-	rela_callback* callback_functions
+	void* custom,
+	size_t registrations,
+	const rela_register* registry
 );
+
+// Opaque type, use functions to access
+typedef struct {
+	unsigned char raw[32];
+} rela_item;
 
 // Execute the Rela VM code once then reset all resources
 int rela_run(rela_vm* rela);
-
+void* rela_custom(rela_vm* rela);
 void rela_destroy(rela_vm* rela);
 void rela_decompile(rela_vm* rela);
 
 // Number of stack items supplied to a callback
 size_t rela_depth(rela_vm* rela);
+void rela_push(rela_vm* rela, rela_item item);
 void rela_push_number(rela_vm* rela, double val);
 void rela_push_integer(rela_vm* rela, int64_t val);
 void rela_push_string(rela_vm* rela, const char* str);
 void rela_push_data(rela_vm* rela, void* data);
 
-double rela_pop_number(rela_vm* rela);
-int64_t rela_pop_integer(rela_vm* rela);
-const char* rela_pop_string(rela_vm* rela);
-void* rela_pop_data(rela_vm* rela);
+rela_item rela_pop(rela_vm* rela);
+rela_item rela_top(rela_vm* rela);
+// index>0 from stack depth() bottom
+// index<=-1 from stack top
+rela_item rela_get(rela_vm* rela, int index);
+bool rela_is_number(rela_vm*, rela_item item);
+bool rela_is_integer(rela_vm*, rela_item item);
+bool rela_is_string(rela_vm*, rela_item item);
+bool rela_is_data(rela_vm*, rela_item item);
+bool rela_is_vector(rela_vm*, rela_item item);
+bool rela_is_map(rela_vm*, rela_item item);
+
+const char* rela_text(rela_vm* vm, rela_item item, char* tmp, size_t size);
+double rela_number(rela_vm* rela, rela_item item);
+int64_t rela_integer(rela_vm* rela, rela_item item);
+const char* rela_string(rela_vm* rela, rela_item item);
+void* rela_data(rela_vm* rela, rela_item item);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

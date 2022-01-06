@@ -24,10 +24,13 @@
 #include "stdio.h"
 #include "string.h"
 
-size_t hello(rela_vm* rela) {
+void hello(rela_vm* rela) {
 	rela_push_string(rela, "hello world");
-	return 1;
 }
+
+rela_register registry[] = {
+	{"hello", hello},
+};
 
 int main(int argc, char* argv[]) {
 	bool decompile = false;
@@ -43,10 +46,7 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
-	rela_vm* rela = rela_create(source, 1024*1024, 1,
-		(const char*[]){"hello"},
-		(rela_callback[]){hello}
-	);
+	rela_vm* rela = rela_create(source, 1024*1024, NULL, sizeof(registry) / sizeof(rela_register), registry);
 
 	if (!rela) exit(1);
 

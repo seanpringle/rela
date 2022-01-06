@@ -195,6 +195,7 @@ typedef struct {
 } allocation_t;
 
 typedef struct _rela_vm {
+	void* custom;
 	size_t memory_limit;
 	size_t memory_usage;
 
@@ -783,7 +784,7 @@ static vec_t* stack(rela_vm* vm) {
 	return &routine(vm)->stack;
 }
 
-static int depth (rela_vm* vm) {
+static int depth(rela_vm* vm) {
 	return vec_size(vm, stack(vm)) - vec_cell(vm, &routine(vm)->marks, -1)->inum;
 }
 
@@ -1432,6 +1433,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// function or method call
 		if (node->call) {
+
 			if (flag_chain)
 				compile(vm, OP_SHUNT);
 
@@ -1445,10 +1447,16 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		// any variable
 		compile(vm, OP_LIT)->item = node->item;
 
-		// map.fields appears as names with index=true, and are handled
-		// at the end of process() along with map.field.chains
+		if (node->index) {
+			compile(vm, assigning ? OP_SET: OP_GET)->item = integer(vm, index);
+		}
+
 		if (!node->index) {
 			compile(vm, assigning ? OP_ASSIGN: OP_FIND)->item = integer(vm, index);
+		}
+
+		if (node->call) {
+			compile(vm, OP_CALL);
 		}
 	}
 	else
@@ -1712,14 +1720,14 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	}
 
 	// node is a vector[index] or map [key]
-	if (node->index) {
+	if (node->index && node->type != NODE_NAME) {
 		compile(vm, assigning ? OP_SET: OP_GET);
 	}
 
-	// node is a non-opcode function call
-	if (node->call && node->type == NODE_NAME) {
-		compile(vm, OP_CALL);
-	}
+//	// node is a non-opcode function call
+//	if (node->call && node->type == NODE_NAME) {
+//		compile(vm, OP_CALL);
+//	}
 
 	// node is part of a vec[tor][chain] or ma.p.chain or a mixture
 	if (node->chain) {
@@ -1753,6 +1761,8 @@ static void op_nop (rela_vm* vm) {
 
 static void op_print(rela_vm* vm) {
 	int items = depth(vm);
+	if (!items) return;
+
 	item_t* item = vec_cell(vm, stack(vm), -items);
 
 	char tmp[100];
@@ -1839,8 +1849,7 @@ static void op_call(rela_vm* vm) {
 	item_t item = pop(vm);
 
 	if (item.type == CALLBACK) {
-		int results = item.cb((rela_vm*)vm);
-		ensure(vm, depth(vm) >= results, "callback underflow");
+		item.cb((rela_vm*)vm);
 		return;
 	}
 
@@ -2429,8 +2438,9 @@ static void destroy(rela_vm* vm) {
 	free(vm);
 }
 
-static rela_vm* create(const char* src, size_t memory, size_t callbacks, const char** callback_names, rela_callback* callback_functions) {
+static rela_vm* create(const char* src, size_t memory, void* custom, size_t registrations, const rela_register* registry) {
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
+	vm->custom = custom;
 	vm->memory_limit = memory;
 	vm->stream_output = stdout;
 
@@ -2451,10 +2461,11 @@ static rela_vm* create(const char* src, size_t memory, size_t callbacks, const c
 
 	vm->code.start = vm->code.depth;
 
-	for (int i = 0; i < callbacks; i++) {
+	for (int i = 0; i < registrations; i++) {
+		const rela_register* reg = &registry[i];
 		map_set(vm, &vm->scope_core,
-			string(vm, strcopy(vm, (char*)callback_names[i])),
-			(item_t){.type = CALLBACK, .cb = callback_functions[i]}
+			string(vm, strcopy(vm, (char*)reg->name)),
+			(item_t){.type = CALLBACK, .cb = reg->func}
 		);
 	}
 
@@ -2477,8 +2488,12 @@ static rela_vm* create(const char* src, size_t memory, size_t callbacks, const c
 	return vm;
 }
 
-rela_vm* rela_create(const char* src, size_t memory, size_t callbacks, const char** callback_names, rela_callback* callback_functions) {
-	return (rela_vm*) create(src, memory, callbacks, callback_names, callback_functions);
+rela_vm* rela_create(const char* src, size_t memory, void* custom, size_t registrations, const rela_register* registry) {
+	return (rela_vm*) create(src, memory, custom, registrations, registry);
+}
+
+void* rela_custom(rela_vm* vm) {
+	return vm->custom;
 }
 
 int rela_run(rela_vm* vm) {
@@ -2498,6 +2513,10 @@ size_t rela_depth(rela_vm* vm) {
 	return depth(vm);
 }
 
+void rela_push(rela_vm* vm, rela_item opaque) {
+	push(vm, *((item_t*)&opaque));
+}
+
 void rela_push_number(rela_vm* vm, double val) {
 	push(vm, (item_t){.type = FLOAT, .fnum = val});
 }
@@ -2514,19 +2533,78 @@ void rela_push_data(rela_vm* vm, void* data) {
 	push(vm, (item_t){.type = USERDATA, .data = data});
 }
 
-double rela_pop_number(rela_vm* vm) {
-	return pop_type(vm, FLOAT).fnum;
+rela_item rela_pop(rela_vm* vm) {
+	rela_item opaque;
+	*((item_t*)&opaque) = pop(vm);
+	return opaque;
 }
 
-int64_t rela_pop_integer(rela_vm* vm) {
-	return pop_type(vm, INTEGER).inum;
+rela_item rela_get(rela_vm* vm, int pos) {
+	rela_item opaque;
+	*((item_t*)&opaque) = *item(vm, pos);
+	return opaque;
 }
 
-const char* rela_pop_string(rela_vm* vm) {
-	return pop_type(vm, STRING).str;
+bool rela_is_number(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == FLOAT;
 }
 
-void* rela_pop_data(rela_vm* vm) {
-	return pop_type(vm, USERDATA).data;
+bool rela_is_integer(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == INTEGER;
+}
+
+bool rela_is_string(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == STRING;
+}
+
+bool rela_is_data(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == USERDATA;
+}
+
+bool rela_is_vector(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == VECTOR;
+}
+
+bool rela_is_map(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == MAP;
+}
+
+const char* rela_text(rela_vm* vm, rela_item opaque, char* tmp, size_t size) {
+	item_t item = *((item_t*)&opaque);
+	return tmptext(vm, item, tmp, size);
+}
+
+double rela_number(rela_vm* vm, rela_item opaque) {
+	char tmp[100];
+	item_t item = *((item_t*)&opaque);
+	ensure(vm, item.type == FLOAT, "item is not a float: %s", tmptext(vm, item, tmp, sizeof(tmp)));
+	return item.fnum;
+}
+
+int64_t rela_integer(rela_vm* vm, rela_item opaque) {
+	char tmp[100];
+	item_t item = *((item_t*)&opaque);
+	ensure(vm, item.type == INTEGER, "item is not an integer: %s", tmptext(vm, item, tmp, sizeof(tmp)));
+	return item.inum;
+}
+
+const char* rela_string(rela_vm* vm, rela_item opaque) {
+	char tmp[100];
+	item_t item = *((item_t*)&opaque);
+	ensure(vm, item.type == STRING, "item is not a string: %s", tmptext(vm, item, tmp, sizeof(tmp)));
+	return item.str;
+}
+
+void* rela_data(rela_vm* vm, rela_item opaque) {
+	char tmp[100];
+	item_t item = *((item_t*)&opaque);
+	ensure(vm, item.type == USERDATA, "item is not userdata: %s", tmptext(vm, item, tmp, sizeof(tmp)));
+	return item.data;
 }
 
