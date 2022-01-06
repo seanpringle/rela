@@ -1,0 +1,15 @@
+
+function alpha()
+	n = 0
+	while true
+		n = n+1
+		yield(n)
+	end
+end
+
+beta = coroutine(alpha)
+
+assert(resume(beta) == 1)
+assert(resume(beta) == 2)
+assert(resume(beta) == 3)
+

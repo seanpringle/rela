@@ -1,0 +1,10 @@
+
+function abc(a)
+	b=2
+	assert(a == 1)
+	assert(b == 2)
+end
+
+abc(1)
+assert(global.a == nil)
+assert(global.b == nil)

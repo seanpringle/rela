@@ -1,0 +1,9 @@
+
+a = [40,3,2,6,4]
+sort(a)
+
+assert(a[0] == 2)
+assert(a[1] == 3)
+assert(a[2] == 4)
+assert(a[3] == 6)
+assert(a[4] == 40)

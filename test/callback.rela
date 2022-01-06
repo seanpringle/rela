@@ -1,0 +1,4 @@
+
+assert(hello)
+assert("hello world" == hello())
+assert(hello() == "hello world")

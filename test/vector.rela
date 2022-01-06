@@ -1,0 +1,6 @@
+
+vec = [1,2,3]
+assert(#vec == 3)
+vec[#vec] = 4
+assert(#vec == 4)
+
