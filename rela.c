@@ -1251,10 +1251,13 @@ static int parse_node(rela_vm* vm, char *source) {
 			continue;
 		}
 
-		// function call arguments
+		// function/opcode call arguments
 		if (source[offset] == '(') {
 			offset += parse_arglist(vm, &source[offset]);
-			if (prev->index) {
+			// Chaining calls ()()...() means the previous node may be
+			// a nested vecmap[...] or already have its own arguments so
+			// chain extra OP_CALLs.
+			if (prev->index || prev->call || prev->args) {
 				node_t* call = node_alloc(vm);
 				call->type = NODE_OPCODE;
 				call->opcode = OP_CALL;
