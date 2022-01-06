@@ -2461,10 +2461,10 @@ static int run(rela_vm* vm) {
 		if (ip < 0 || ip >= vm->code.depth) break;
 		funcs[vm->code.cells[ip].op].func(vm);
 
-		char tmp[100];
-		fprintf(stderr, "ip %d ", ip);
-		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
-		fprintf(stderr, "\n");
+//		char tmp[100];
+//		fprintf(stderr, "ip %d ", ip);
+//		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
+//		fprintf(stderr, "\n");
 	}
 
 	reset(vm);

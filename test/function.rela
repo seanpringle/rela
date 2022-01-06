@@ -1,24 +1,11 @@
 
-//function abc(a)
-//	b=2
-//	assert(a == 1)
-//	assert(b == 2)
-//end
-//
-//abc(1)
-//assert(global.a == nil)
-//assert(global.b == nil)
-
-function def(n)
-	return "xyz"
+function abc(a)
+	b=2
+	assert(a == 1)
+	assert(b == 2)
 end
 
-assert(global.def(1) == "xyz")
+abc(1)
+assert(global.a == nil)
+assert(global.b == nil)
 
-assert(global[def(1)] == nil)
-
-function ghi()
-	return "def"
-end
-
-assert(global[ghi()](1) == "xyz")
