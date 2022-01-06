@@ -8,3 +8,11 @@ end
 abc(1)
 assert(global.a == nil)
 assert(global.b == nil)
+
+function def(n)
+	return "xyz"
+end
+
+assert(global.def(1) == "xyz")
+
+assert(global[def(1)] == nil)

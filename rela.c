@@ -132,6 +132,7 @@ typedef struct _node_t {
 	struct _node_t *args;
 	struct _node_t *chain;
 	bool index;
+	bool field;
 	vec_t keys;
 	vec_t vals;
 	int results;
@@ -1277,7 +1278,7 @@ static int parse_node(rela_vm* vm, char *source) {
 			offset += parse_node(vm, &source[offset]);
 			prev->chain = pop(vm).node;
 			prev = prev->chain;
-			prev->index = true;
+			prev->field = true;
 			continue;
 		}
 
@@ -1400,7 +1401,6 @@ static int parse(rela_vm* vm, char *source, int results, int mode) {
 
 static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	int flag_assign = flags & PROCESS_ASSIGN ? 1:0;
-	int flag_chain  = flags & PROCESS_CHAIN  ? 1:0;
 
 	// if we're assigning with chained expressions, only OP_SET|OP_ASSIGN the last one
 	bool assigning = flag_assign && !node->chain;
@@ -1434,29 +1434,81 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		// function or method call
 		if (node->call) {
 
-			if (flag_chain)
-				compile(vm, OP_SHUNT);
+			// vecmap[fn()]
+			if (node->index) {
+				compile(vm, OP_MARK);
+				if (node->args)
+					process(vm, node->args, 0, 0);
+				compile(vm, OP_LIT)->item = node->item;
+				compile(vm, OP_FIND);
+				compile(vm, OP_CALL);
+				compile(vm, OP_LIMIT)->item = integer(vm, 1);
+				compile(vm, assigning ? OP_SET: OP_GET)->item = integer(vm, index);
+			}
 
-			if (node->args)
-				process(vm, node->args, 0, 0);
+			// .fn()
+			if (node->field) {
+				compile(vm, OP_LIT)->item = node->item;
+				compile(vm, assigning ? OP_SET: OP_GET)->item = integer(vm, index);
+				if (node->args) {
+					compile(vm, OP_SHUNT);
+					process(vm, node->args, 0, 0);
+					compile(vm, OP_SHIFT);
+				}
+				compile(vm, OP_CALL);
+			}
 
-			if (flag_chain)
-				compile(vm, OP_SHIFT);
+			// fn()
+			if (!node->index && !node->field) {
+				if (node->args)
+					process(vm, node->args, 0, 0);
+				compile(vm, OP_LIT)->item = node->item;
+				compile(vm, assigning ? OP_ASSIGN: OP_FIND)->item = integer(vm, index);
+				compile(vm, OP_CALL);
+			}
+		}
+		// variable reference
+		else {
+			compile(vm, OP_LIT)->item = node->item;
+
+			if (node->index || node->field) {
+				compile(vm, assigning ? OP_SET: OP_GET)->item = integer(vm, index);
+			}
+
+			if (!node->index && !node->field) {
+				compile(vm, assigning ? OP_ASSIGN: OP_FIND)->item = integer(vm, index);
+			}
 		}
 
-		// any variable
-		compile(vm, OP_LIT)->item = node->item;
+		if (node->chain) {
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
+		}
+	}
+	else
+	// inline opcode
+	if (node->type == NODE_OPCODE) {
+		if (node->args)
+			process(vm, node->args, 0, 0);
+
+		if (node->opcode == OP_AND || node->opcode == OP_OR) {
+			process(vm, vec_get(vm, &node->vals, 0).node, 0, 0);
+			code_t *jump = compile(vm, node->opcode);
+			process(vm, vec_get(vm, &node->vals, 1).node, 0, 0);
+			jump->item = integer(vm, vm->code.depth);
+		}
+		else {
+			for (int i = 0; i < vec_size(vm, &node->vals); i++)
+				process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+
+			compile(vm, node->opcode);
+		}
 
 		if (node->index) {
 			compile(vm, assigning ? OP_SET: OP_GET)->item = integer(vm, index);
 		}
 
-		if (!node->index) {
-			compile(vm, assigning ? OP_ASSIGN: OP_FIND)->item = integer(vm, index);
-		}
-
-		if (node->call) {
-			compile(vm, OP_CALL);
+		if (node->chain) {
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
 		}
 	}
 	else
@@ -1518,24 +1570,13 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		else {
 			compile(vm, OP_LIT)->item = node->item;
 		}
-	}
-	else
-	// inline opcode
-	if (node->type == NODE_OPCODE) {
-		if (node->args)
-			process(vm, node->args, 0, 0);
 
-		if (node->opcode == OP_AND || node->opcode == OP_OR) {
-			process(vm, vec_get(vm, &node->vals, 0).node, 0, 0);
-			code_t *jump = compile(vm, node->opcode);
-			process(vm, vec_get(vm, &node->vals, 1).node, 0, 0);
-			jump->item = integer(vm, vm->code.depth);
+		if (node->index) {
+			compile(vm, assigning ? OP_SET: OP_GET)->item = integer(vm, index);
 		}
-		else {
-			for (int i = 0; i < vec_size(vm, &node->vals); i++)
-				process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
 
-			compile(vm, node->opcode);
+		if (node->chain) {
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
 		}
 	}
 	else
@@ -1717,21 +1758,6 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	}
 	else {
 		ensure(vm, 0, "unexpected expression type: %d", node->type);
-	}
-
-	// node is a vector[index] or map [key]
-	if (node->index && node->type != NODE_NAME) {
-		compile(vm, assigning ? OP_SET: OP_GET);
-	}
-
-//	// node is a non-opcode function call
-//	if (node->call && node->type == NODE_NAME) {
-//		compile(vm, OP_CALL);
-//	}
-
-	// node is part of a vec[tor][chain] or ma.p.chain or a mixture
-	if (node->chain) {
-		process(vm, node->chain, PROCESS_CHAIN | (flag_assign ? PROCESS_ASSIGN: 0), 0);
 	}
 }
 
@@ -2419,6 +2445,11 @@ static int run(rela_vm* vm) {
 		int ip = routine(vm)->ip++;
 		if (ip < 0 || ip >= vm->code.depth) break;
 		funcs[vm->code.cells[ip].op].func(vm);
+
+//		char tmp[100];
+//		fprintf(stderr, "ip %d ", ip);
+//		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
+//		fprintf(stderr, "\n");
 	}
 
 	reset(vm);
