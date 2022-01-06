@@ -1253,9 +1253,18 @@ static int parse_node(rela_vm* vm, char *source) {
 
 		// function call arguments
 		if (source[offset] == '(') {
-			prev->call = 1;
 			offset += parse_arglist(vm, &source[offset]);
-			prev->args = pop(vm).node;
+			if (prev->index) {
+				node_t* call = node_alloc(vm);
+				call->type = NODE_OPCODE;
+				call->opcode = OP_CALL;
+				call->args = pop(vm).node;
+				prev->chain = call;
+				prev = call;
+			} else {
+				prev->call = 1;
+				prev->args = pop(vm).node;
+			}
 			break;
 		}
 
@@ -1487,8 +1496,14 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	else
 	// inline opcode
 	if (node->type == NODE_OPCODE) {
+		if (node->opcode == OP_CALL)
+			compile(vm, OP_SHUNT);
+
 		if (node->args)
 			process(vm, node->args, 0, 0);
+
+		if (node->opcode == OP_CALL)
+			compile(vm, OP_SHIFT);
 
 		if (node->opcode == OP_AND || node->opcode == OP_OR) {
 			process(vm, vec_get(vm, &node->vals, 0).node, 0, 0);
@@ -2446,10 +2461,10 @@ static int run(rela_vm* vm) {
 		if (ip < 0 || ip >= vm->code.depth) break;
 		funcs[vm->code.cells[ip].op].func(vm);
 
-//		char tmp[100];
-//		fprintf(stderr, "ip %d ", ip);
-//		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
-//		fprintf(stderr, "\n");
+		char tmp[100];
+		fprintf(stderr, "ip %d ", ip);
+		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
+		fprintf(stderr, "\n");
 	}
 
 	reset(vm);
