@@ -8,13 +8,12 @@ rel: LFLAGS=-lm -lpcre
 rel: CFLAGS=-Wall -O3 -std=c11 -DNDEBUG -DPCRE -DPCRE_STUDY_JIT_COMPILE
 rel: rela.o cli.o
 	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
+	ar rcs librela.a rela.o
 
 lite: LFLAGS=-lm
 lite: CFLAGS=-Wall -Os -std=c11 -DNDEBUG
 lite: rela.o cli.o
 	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
-
-lib: rel
 	ar rcs librela.a rela.o
 
 prof: rel
