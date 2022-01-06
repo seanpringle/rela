@@ -1,21 +1,21 @@
 
-OBJECTS=$(shell ls -1 *.c | sed 's/c$$/o/g')
-TESTS=$(wildcard test/*)
-
 dev: LFLAGS=-lm -lpcre
 dev: CFLAGS=-Wall -Werror -O0 -g -std=c11 -DPCRE
-dev: $(OBJECTS)
-	gcc $(CFLAGS) -o rela $(OBJECTS) $(LFLAGS)
+dev: rela.o cli.o
+	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
 
 rel: LFLAGS=-lm -lpcre
 rel: CFLAGS=-Wall -O3 -std=c11 -DNDEBUG -DPCRE -DPCRE_STUDY_JIT_COMPILE
-rel: $(OBJECTS)
-	gcc $(CFLAGS) -o rela $(OBJECTS) $(LFLAGS)
+rel: rela.o cli.o
+	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
 
 lite: LFLAGS=-lm
 lite: CFLAGS=-Wall -Os -std=c11 -DNDEBUG
-lite: $(OBJECTS)
-	gcc $(CFLAGS) -o rela $(OBJECTS) $(LFLAGS)
+lite: rela.o cli.o
+	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
+
+lib: rel
+	ar rcs librela.a rela.o
 
 prof: rel
 	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 CPUPROFILE=/tmp/rela.prof ./rela test.ts
@@ -25,7 +25,7 @@ prof: rel
 	gcc $(CFLAGS) -c $< -o $@
 
 test: dev
-	$(foreach script, $(TESTS), echo $(script) && ./rela $(script) &&) true
+	$(foreach script, $(wildcard test/*), echo $(script) && ./rela $(script) &&) true
 
 clean:
-	rm -f rela *.o
+	rm -f rela librela.a *.o
