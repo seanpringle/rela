@@ -222,7 +222,7 @@ typedef struct _rela_vm {
 
 	// compiled "bytecode"
 	struct {
-		code_t* cells;
+		code_t cells[1000];
 		int depth;
 		int start;
 	} code;
@@ -232,6 +232,7 @@ typedef struct _rela_vm {
 		char** cells;
 		int depth;
 		int start;
+		region_t region;
 	} strings;
 
 	// compile-time scope tree
@@ -318,7 +319,7 @@ static void region_truncate(region_t* region) {
 
 static void* allot(rela_vm* vm, size_t bytes) {
 	void* ptr = region_allot(&vm->general, bytes);
-	ensure(vm, vm->general.bytes + vm->vectors.bytes <= vm->memory_limit, "out of memory");
+	ensure(vm, vm->general.bytes + vm->vectors.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
 	return ptr;
 }
 
@@ -354,7 +355,7 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 
 	vec->items[index].type = NIL;
 
-	ensure(vm, vm->general.bytes + vm->vectors.bytes <= vm->memory_limit, "out of memory");
+	ensure(vm, vm->general.bytes + vm->vectors.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
 	return &vec->items[index];
 }
 
@@ -454,7 +455,8 @@ static int map_lower_bound(rela_vm* vm, map_t* map, item_t key) {
 
 static item_t* map_ref(rela_vm* vm, map_t* map, item_t key) {
 	int i = map_lower_bound(vm, map, key);
-	return (i < vec_size(vm, &map->keys) && equal(vm, vec_get(vm, &map->keys, i), key)) ? vec_cell(vm, &map->vals, i): NULL;
+	return (i < vec_size(vm, &map->keys) && equal(vm, vec_get(vm, &map->keys, i), key))
+		? vec_cell(vm, &map->vals, i): NULL;
 }
 
 static bool map_get(rela_vm* vm, map_t* map, item_t key, item_t* val) {
@@ -490,16 +492,13 @@ static void map_set(rela_vm* vm, map_t* map, item_t key, item_t val) {
 	}
 }
 
-static const char* strintern(rela_vm* vm, const char* str) {
-	ensure(vm, str, "strintern() null string");
+static int str_lower_bound(rela_vm* vm, const char *str) {
+	ensure(vm, str, "str_lower_bound() null string");
 
-	int size = vm->strings.depth;
 	int index = 0;
-
-	if (size) {
+	if (vm->strings.depth) {
 		int lower = 0;
-		int upper = size-1;
-
+		int upper = vm->strings.depth-1;
 		while (lower <= upper) {
 			int i = (int)floor((float)(lower + upper) / 2.0f);
 			int c = strcmp(vm->strings.cells[i], str);
@@ -507,34 +506,56 @@ static const char* strintern(rela_vm* vm, const char* str) {
 			if (c < 0) lower = i+1; else upper = i-1;
 			index = lower;
 		}
+	}
+	assert(index >= 0 && index <= vm->strings.depth);
+	return index;
+}
 
-		if (index < vm->strings.depth && vm->strings.cells[index] == str) {
-			return str;
-		}
+static const char* strintern(rela_vm* vm, const char* str) {
+	ensure(vm, str, "strintern() null string");
 
-		if (index < vm->strings.depth && strcmp(vm->strings.cells[index], str) == 0) {
-			return vm->strings.cells[index];
-		}
+	int index = str_lower_bound(vm, str);
+
+	if (index < vm->strings.depth && vm->strings.cells[index] == str) {
+		return str;
+	}
+
+	if (index < vm->strings.depth && strcmp(vm->strings.cells[index], str) == 0) {
+		return vm->strings.cells[index];
 	}
 
 	int len = strlen(str);
-	char* cpy = allot(vm, len+1);
-	memcpy(cpy, str, len);
-	cpy[len] = 0;
+	char* cpy = region_allot(&vm->strings.region, len+1);
+	memmove(cpy, str, len);
 
 	vm->strings.depth++;
 	vm->strings.cells = realloc(vm->strings.cells, vm->strings.depth * sizeof(char*));
-	assert(index >= 0 && index < vm->strings.depth);
 
-	if (index == vm->strings.depth-1) {
-		vm->strings.cells[index] = cpy;
-		return cpy;
+	if (index < vm->strings.depth-1) {
+		memmove(&vm->strings.cells[index+1], &vm->strings.cells[index], (vm->strings.depth - index - 1) * sizeof(char*));
 	}
-
-	memmove(&vm->strings.cells[index+1], &vm->strings.cells[index], (vm->strings.depth - index - 1) * sizeof(char*));
 
 	vm->strings.cells[index] = cpy;
 	return cpy;
+}
+
+static void strindex(rela_vm* vm) {
+	vm->strings.depth = 0;
+
+	for (int i = 0, l = vm->strings.region.depth; i < l; i++) {
+		char *str = vm->strings.region.cells[i].ptr;
+
+		int index = str_lower_bound(vm, str);
+		assert(index == vm->strings.depth || (index < vm->strings.depth && vm->strings.cells[index] != str));
+
+		vm->strings.depth++;
+
+		if (index < vm->strings.depth-1) {
+			memmove(&vm->strings.cells[index+1], &vm->strings.cells[index], (vm->strings.depth - index - 1) * sizeof(char*));
+		}
+
+		vm->strings.cells[index] = str;
+	}
 }
 
 static const char* substr(rela_vm* vm, const char *start, int off, int len) {
@@ -594,6 +615,13 @@ static void reset(rela_vm* vm) {
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
 	region_truncate(&vm->general);
 	region_truncate(&vm->vectors);
+
+	region_truncate(&vm->strings.region);
+	assert(vm->strings.region.depth == vm->strings.region.start);
+	strindex(vm);
+	assert(vm->strings.depth == vm->strings.start);
+	assert(vm->strings.depth == vm->strings.region.depth);
+
 	vm->scope_global = NULL;
 }
 
@@ -702,23 +730,23 @@ static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	if (a.type == VECTOR) {
 		int len = snprintf(tmp, size, "[");
 		for (int i = 0, l = vec_size(vm, a.vec); len < size && i < l; i++) {
-			len += snprintf(tmp+len, size-len, "%s",
+			if (len < size) len += snprintf(tmp+len, size-len, "%s",
 				tmptext(vm, vec_get(vm, a.vec, i), subtmpA, sizeof(subtmpA)));
-			if (i < l-1) len += snprintf(tmp+len, size-len, ", ");
+			if (len < size && i < l-1) len += snprintf(tmp+len, size-len, ", ");
 		}
-		len += snprintf(tmp+len, size-len, "]");
+		if (len < size) len += snprintf(tmp+len, size-len, "]");
 	}
 
 	if (a.type == MAP) {
 		int len = snprintf(tmp, size, "{");
 		for (int i = 0, l = vec_size(vm, &a.map->keys); len < size && i < l; i++) {
-			len += snprintf(tmp+len, size-len, "%s = %s",
+			if (len < size) len += snprintf(tmp+len, size-len, "%s = %s",
 				tmptext(vm, vec_get(vm, &a.map->keys, i), subtmpA, sizeof(subtmpA)),
 				tmptext(vm, vec_get(vm, &a.map->vals, i), subtmpB, sizeof(subtmpB))
 			);
-			if (i < l-1) len += snprintf(tmp+len, size-len, ", ");
+			if (len < size && i < l-1) len += snprintf(tmp+len, size-len, ", ");
 		}
-		len += snprintf(tmp+len, size-len, "}");
+		if (len < size) len += snprintf(tmp+len, size-len, "}");
 	}
 
 	assert(tmp[0]);
@@ -730,15 +758,9 @@ static cor_t* cor_allot(rela_vm* vm) {
 }
 
 static code_t* compile(rela_vm* vm, int op) {
-	if (!vm->code.cells) {
-		vm->code.cells = malloc(1024 * sizeof(code_t));
-	}
-	if (vm->code.depth%1024 == 0) {
-		vm->code.cells = realloc(vm->code.cells, (vm->code.depth+1024) * sizeof(code_t));
-	}
 	code_t* c = &vm->code.cells[vm->code.depth++];
 	c->op = op;
-	c->item.type = 0;
+	c->item.type = NIL;
 	c->item.inum = 0;
 	return c;
 }
@@ -752,7 +774,8 @@ static vec_t* stack(rela_vm* vm) {
 }
 
 static int depth(rela_vm* vm) {
-	return vec_size(vm, stack(vm)) - vec_cell(vm, &routine(vm)->marks, -1)->inum;
+	int base = vec_cell(vm, &routine(vm)->marks, -1)->inum;
+	return vec_size(vm, stack(vm)) - base;
 }
 
 static void push(rela_vm* vm, item_t item) {
@@ -768,7 +791,8 @@ static item_t top(rela_vm* vm) {
 }
 
 static item_t* item(rela_vm* vm, int i) {
-	return vec_cell(vm, stack(vm), i);
+	int base = vec_cell(vm, &routine(vm)->marks, -1)->inum;
+	return vec_cell(vm, stack(vm), i >= 0 ? base+i: i);
 }
 
 static item_t pop_type(rela_vm* vm, int type) {
@@ -1728,7 +1752,10 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		code_t *iter = compile(vm, OP_FOR);
 		// OP_FOR expects a vector with key[,val] variable names
-		iter->item = (item_t){.type = VECTOR, .vec = &node->keys};
+		// but node freed after compilation so can't &node->keys
+		vec_t* vec = vec_allot(vm);
+		*vec = node->keys;
+		iter->item = (item_t){.type = VECTOR, .vec = vec};
 
 		// block
 		for (int i = 0; i < vec_size(vm, &node->vals); i++)
@@ -1813,7 +1840,7 @@ static void op_print(rela_vm* vm) {
 
 	item_t* item = vec_cell(vm, stack(vm), -items);
 
-	char tmp[STRTMP];
+	char tmp[STRBUF];
 	for (int i = 0; i < items; i++) {
 		const char *str = tmptext(vm, *item++, tmp, sizeof(tmp));
 		fprintf(stdout, "%s%s", i ? "\t": "", str);
@@ -2141,7 +2168,7 @@ static void op_assign(rela_vm* vm) {
 
 	int index = literal_int(vm);
 	// indexed from the base of the current marked frame
-	item_t val = index < depth(vm) ? *item(vm, -depth(vm)+index): nil(vm);
+	item_t val = depth(vm) ? *item(vm, index): nil(vm);
 
 	assign(vm, key, val);
 }
@@ -2161,6 +2188,8 @@ static void op_for(rela_vm* vm) {
 
 	int var = 0;
 	vec_t* vars = literal(vm).vec;
+	assert(vec_size(vm, vars) >= 2);
+
 	int quit = vec_get(vm, vars, vec_size(vm, vars)-1).inum;
 
 	item_t item = pop(vm);
@@ -2215,13 +2244,7 @@ static void op_for(rela_vm* vm) {
 	}
 }
 
-static void op_set(rela_vm* vm) {
-	item_t key = pop(vm);
-	item_t dst = pop(vm);
-
-	int index = literal_int(vm);
-	item_t val = index < depth(vm) ? *item(vm, index): nil(vm);
-
+static void set(rela_vm* vm, item_t dst, item_t key, item_t val) {
 	if (dst.type == VECTOR && key.type == INTEGER && key.inum == vec_size(vm, dst.vec)) {
 		vec_push(vm, dst.vec, val);
 	}
@@ -2240,24 +2263,37 @@ static void op_set(rela_vm* vm) {
 	}
 }
 
-static void op_get(rela_vm* vm) {
+static void op_set(rela_vm* vm) {
 	item_t key = pop(vm);
-	item_t src = pop(vm);
+	item_t dst = pop(vm);
 
+	int index = literal_int(vm);
+	item_t val = depth(vm) ? *item(vm, index): nil(vm);
+	set(vm, dst, key, val);
+}
+
+static item_t get(rela_vm* vm, item_t src, item_t key) {
 	if (src.type == VECTOR && key.type == INTEGER) {
-		push(vm, vec_get(vm, src.vec, key.inum));
+		return vec_get(vm, src.vec, key.inum);
 	}
 	else
 	if (src.type == MAP) {
 		item_t val = nil(vm);
 		map_get(vm, src.map, key, &val);
-		push(vm, val);
+		return val;
 	}
 	else {
 		char tmpA[STRTMP];
 		char tmpB[STRTMP];
 		ensure(vm, 0, "cannot get %s from item %s", tmptext(vm, key, tmpA, sizeof(tmpA)), tmptext(vm, key, tmpB, sizeof(tmpB)));
 	}
+	return nil(vm);
+}
+
+static void op_get(rela_vm* vm) {
+	item_t key = pop(vm);
+	item_t src = pop(vm);
+	push(vm, get(vm, src, key));
 }
 
 static void op_add(rela_vm* vm) {
@@ -2455,7 +2491,7 @@ static void op_sort(rela_vm* vm) {
 }
 
 static void op_assert(rela_vm* vm) {
-	ensure(vm, depth(vm) && truth(vm, *item(vm, 0)), "assert");
+	ensure(vm, depth(vm) && truth(vm, top(vm)), "assert");
 }
 
 func_t funcs[OPERATIONS] = {
@@ -2562,11 +2598,14 @@ static void destroy(rela_vm* vm) {
 
 	vm->general.start = 0;
 	vm->vectors.start = 0;
+	vm->strings.start = 0;
+	vm->strings.region.start = 0;
 	reset(vm);
-	free(vm->code.cells);
+//	free(vm->code.cells);
 	free(vm->general.cells);
 	free(vm->prepare.cells);
 	free(vm->strings.cells);
+	free(vm->strings.region.cells);
 	free(vm->vectors.cells);
 	free(vm);
 }
@@ -2614,6 +2653,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 
 	vm->general.start = vm->general.depth;
 	vm->strings.start = vm->strings.depth;
+	vm->strings.region.start = vm->strings.region.depth;
 	vm->vectors.start = vm->vectors.depth;
 	region_truncate(&vm->prepare);
 	return vm;
@@ -2648,20 +2688,24 @@ void rela_push(rela_vm* vm, rela_item opaque) {
 	push(vm, *((item_t*)&opaque));
 }
 
-void rela_push_number(rela_vm* vm, double val) {
+rela_item rela_make_number(rela_vm* vm, double val) {
 	push(vm, (item_t){.type = FLOAT, .fnum = val});
+	return rela_pop(vm);
 }
 
-void rela_push_integer(rela_vm* vm, int64_t val) {
+rela_item rela_make_integer(rela_vm* vm, int64_t val) {
 	push(vm, integer(vm, val));
+	return rela_pop(vm);
 }
 
-void rela_push_string(rela_vm* vm, const char* str) {
+rela_item rela_make_string(rela_vm* vm, const char* str) {
 	push(vm, string(vm, str));
+	return rela_pop(vm);
 }
 
-void rela_push_data(rela_vm* vm, void* data) {
+rela_item rela_make_data(rela_vm* vm, void* data) {
 	push(vm, (item_t){.type = USERDATA, .data = data});
+	return rela_pop(vm);
 }
 
 rela_item rela_pop(rela_vm* vm) {
@@ -2670,10 +2714,15 @@ rela_item rela_pop(rela_vm* vm) {
 	return opaque;
 }
 
-rela_item rela_get(rela_vm* vm, int pos) {
+rela_item rela_pick(rela_vm* vm, int pos) {
 	rela_item opaque;
 	*((item_t*)&opaque) = *item(vm, pos);
 	return opaque;
+}
+
+bool rela_is_nil(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == NIL;
 }
 
 bool rela_is_number(rela_vm* vm, rela_item opaque) {
@@ -2706,33 +2755,74 @@ bool rela_is_map(rela_vm* vm, rela_item opaque) {
 	return item.type == MAP;
 }
 
-const char* rela_text(rela_vm* vm, rela_item opaque, char* tmp, size_t size) {
+size_t rela_count(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	push(vm, item);
+	op_count(vm);
+	return pop(vm).inum;
+}
+
+rela_item rela_vector_get(rela_vm* vm, rela_item vec, int index) {
+	item_t ivec = *((item_t*)&vec);
+	push(vm, get(vm, ivec, integer(vm, index)));
+	return rela_pop(vm);
+}
+
+void rela_vector_set(rela_vm* vm, rela_item vec, int index, rela_item val) {
+	item_t ivec = *((item_t*)&vec);
+	item_t ival = *((item_t*)&val);
+	set(vm, ivec, integer(vm, index), ival);
+}
+
+rela_item rela_map_get(rela_vm* vm, rela_item map, rela_item key) {
+	item_t imap = *((item_t*)&map);
+	item_t ikey = *((item_t*)&key);
+	push(vm, get(vm, imap, ikey));
+	return rela_pop(vm);
+}
+
+void rela_map_set(rela_vm* vm, rela_item map, rela_item key, rela_item val) {
+	item_t imap = *((item_t*)&map);
+	item_t ikey = *((item_t*)&key);
+	item_t ival = *((item_t*)&key);
+	set(vm, imap, ikey, ival);
+}
+
+rela_item rela_map_key(rela_vm* vm, rela_item con, int index) {
+	item_t icon = *((item_t*)&con);
+	push(vm, icon);
+	map_t* map = pop_type(vm, MAP).map;
+	push(vm, vec_size(vm, &map->keys) > index ? vec_get(vm, &map->keys, index): nil(vm));
+	return rela_pop(vm);
+}
+
+const char* rela_to_text(rela_vm* vm, rela_item opaque, char* tmp, size_t size) {
 	item_t item = *((item_t*)&opaque);
 	return tmptext(vm, item, tmp, size);
 }
 
-double rela_number(rela_vm* vm, rela_item opaque) {
+double rela_to_number(rela_vm* vm, rela_item opaque) {
 	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == FLOAT, "item is not a float: %s", tmptext(vm, item, tmp, sizeof(tmp)));
 	return item.fnum;
 }
 
-int64_t rela_integer(rela_vm* vm, rela_item opaque) {
+int64_t rela_to_integer(rela_vm* vm, rela_item opaque) {
 	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == INTEGER, "item is not an integer: %s", tmptext(vm, item, tmp, sizeof(tmp)));
 	return item.inum;
 }
 
-const char* rela_string(rela_vm* vm, rela_item opaque) {
+const char* rela_to_string(rela_vm* vm, rela_item opaque) {
 	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == STRING, "item is not a string: %s", tmptext(vm, item, tmp, sizeof(tmp)));
 	return item.str;
 }
 
-void* rela_data(rela_vm* vm, rela_item opaque) {
+void* rela_to_data(rela_vm* vm, rela_item opaque) {
 	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == USERDATA, "item is not userdata: %s", tmptext(vm, item, tmp, sizeof(tmp)));

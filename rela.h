@@ -65,16 +65,17 @@ void rela_decompile(rela_vm* rela);
 // Number of stack items supplied to a callback
 size_t rela_depth(rela_vm* rela);
 void rela_push(rela_vm* rela, rela_item item);
-void rela_push_number(rela_vm* rela, double val);
-void rela_push_integer(rela_vm* rela, int64_t val);
-void rela_push_string(rela_vm* rela, const char* str);
-void rela_push_data(rela_vm* rela, void* data);
+rela_item rela_make_number(rela_vm* rela, double val);
+rela_item rela_make_integer(rela_vm* rela, int64_t val);
+rela_item rela_make_string(rela_vm* rela, const char* str);
+rela_item rela_make_data(rela_vm* rela, void* data);
 
 rela_item rela_pop(rela_vm* rela);
 rela_item rela_top(rela_vm* rela);
 // index>0 from stack depth() bottom
 // index<=-1 from stack top
-rela_item rela_get(rela_vm* rela, int index);
+rela_item rela_pick(rela_vm* rela, int index);
+bool rela_is_nil(rela_vm*, rela_item item);
 bool rela_is_number(rela_vm*, rela_item item);
 bool rela_is_integer(rela_vm*, rela_item item);
 bool rela_is_string(rela_vm*, rela_item item);
@@ -82,11 +83,20 @@ bool rela_is_data(rela_vm*, rela_item item);
 bool rela_is_vector(rela_vm*, rela_item item);
 bool rela_is_map(rela_vm*, rela_item item);
 
-const char* rela_text(rela_vm* vm, rela_item item, char* tmp, size_t size);
-double rela_number(rela_vm* rela, rela_item item);
-int64_t rela_integer(rela_vm* rela, rela_item item);
-const char* rela_string(rela_vm* rela, rela_item item);
-void* rela_data(rela_vm* rela, rela_item item);
+size_t rela_count(rela_vm* vm, rela_item vec);
+
+rela_item rela_vector_get(rela_vm* vm, rela_item con, int index);
+void rela_vector_set(rela_vm* vm, rela_item con, int index, rela_item val);
+
+rela_item rela_map_get(rela_vm* vm, rela_item con, rela_item key);
+rela_item rela_map_key(rela_vm* vm, rela_item con, int index);
+void rela_map_set(rela_vm* vm, rela_item con, rela_item key, rela_item val);
+
+const char* rela_to_text(rela_vm* vm, rela_item item, char* tmp, size_t size);
+double rela_to_number(rela_vm* rela, rela_item item);
+int64_t rela_to_integer(rela_vm* rela, rela_item item);
+const char* rela_to_string(rela_vm* rela, rela_item item);
+void* rela_to_data(rela_vm* rela, rela_item item);
 
 #ifdef __cplusplus
 }

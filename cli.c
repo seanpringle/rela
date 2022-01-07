@@ -25,7 +25,7 @@
 #include "string.h"
 
 void hello(rela_vm* rela) {
-	rela_push_string(rela, "hello world");
+	rela_push(rela, rela_make_string(rela, "hello world"));
 }
 
 rela_register registry[] = {
@@ -49,9 +49,9 @@ int main(int argc, char* argv[]) {
 	rela_vm* rela = rela_create(source, 1024*1024, NULL, sizeof(registry) / sizeof(rela_register), registry);
 
 	if (!rela) exit(1);
+	if (decompile) rela_decompile(rela);
 
 	int rc = rela_run(rela);
-	if (decompile) rela_decompile(rela);
 
 	rela_destroy(rela);
 	return rc;
