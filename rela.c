@@ -74,8 +74,8 @@ enum {
 	NODE_BUILTIN, NODE_VEC, NODE_MAP, NODE_FOR
 };
 
-#define STRTMP 100  // scratch space buffers on stack
-#define STRBUF 1000 // strf, strcopy, strliteral buffers on stack
+#define STRTMP 100
+#define STRBUF 1000
 
 struct _vec_t;
 struct _map_t;
@@ -535,20 +535,6 @@ static const char* strintern(rela_vm* vm, const char* str) {
 
 	vm->strings.cells[index] = cpy;
 	return cpy;
-}
-
-static const char* strcopy(rela_vm* vm, const char* str) {
-	return strintern(vm, str);
-}
-
-static const char* strf(rela_vm *vm, const char *pattern, ...) {
-	va_list args;
-	char buf[STRBUF];
-	va_start(args, pattern);
-	int len = vsnprintf(buf, STRBUF, pattern, args);
-	va_end(args);
-	ensure(vm, len < sizeof(buf), "strf max length exceeded (%d bytes)", STRBUF-1);
-	return strintern(vm,buf);
 }
 
 static const char* substr(rela_vm* vm, const char *start, int off, int len) {
@@ -2416,14 +2402,10 @@ static void op_match(rela_vm* vm) {
 		matches = sizeof(ovector)/3;
 	}
 
-	char buffer[strlen(subject.str)+1];
-
 	for (int i = 0; i < matches; i++) {
 		int offset = ovector[2*i];
 		int length = ovector[2*i+1] - offset;
-		memmove(buffer, subject.str+offset, length);
-		buffer[length] = 0;
-		push(vm, string(vm, strf(vm, "%s", buffer)));
+		push(vm, string(vm, substr(vm, subject.str, offset, length)));
 	}
 
 	if (extra)
@@ -2611,7 +2593,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	for (int i = 0; i < registrations; i++) {
 		const rela_register* reg = &registry[i];
 		map_set(vm, &vm->scope_core,
-			string(vm, strcopy(vm, (char*)reg->name)),
+			string(vm, (char*)reg->name),
 			(item_t){.type = CALLBACK, .cb = reg->func}
 		);
 	}
@@ -2675,7 +2657,7 @@ void rela_push_integer(rela_vm* vm, int64_t val) {
 }
 
 void rela_push_string(rela_vm* vm, const char* str) {
-	push(vm, string(vm, strcopy(vm, str)));
+	push(vm, string(vm, str));
 }
 
 void rela_push_data(rela_vm* vm, void* data) {
