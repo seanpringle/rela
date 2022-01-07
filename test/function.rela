@@ -9,3 +9,19 @@ abc(1)
 assert(global.a == nil)
 assert(global.b == nil)
 
+function outer()
+	function inner()
+		return 1
+	end
+	function inner2()
+		return inner()+1
+	end
+	assert(inner)
+	assert(local.inner == inner)
+	assert(inner() == 1)
+	assert(inner2() == 2)
+end
+
+assert(global.inner == nil)
+
+outer()

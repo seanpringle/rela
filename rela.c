@@ -224,7 +224,6 @@ typedef struct _rela_vm {
 	} strings;
 
 	vec_t scope_cache;
-	FILE *stream_output;
 
 	jmp_buf jmp;
 	char err[100];
@@ -715,6 +714,7 @@ static char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	if (a.type == BOOLEAN) snprintf(tmp, size, "%s", a.flag ? "true": "false");
 	if (a.type == SUBROUTINE) snprintf(tmp, size, "%s(%d)", type_names[a.type], a.sub);
 	if (a.type == COROUTINE) snprintf(tmp, size, "%s", type_names[a.type]);
+	if (a.type == CALLBACK) snprintf(tmp, size, "%s", type_names[a.type]);
 	if (a.type == USERDATA) snprintf(tmp, size, "%s", type_names[a.type]);
 	if (a.type == NODE) snprintf(tmp, size, "%s", type_names[a.type]);
 
@@ -757,11 +757,25 @@ static code_t* compile(rela_vm* vm, int op) {
 	if (vm->code.depth%1024 == 0) {
 		vm->code.cells = realloc(vm->code.cells, (vm->code.depth+1024) * sizeof(code_t));
 	}
+
+	// some peephole
+	if (vm->code.depth) {
+		code_t* last = &vm->code.cells[vm->code.depth-1];
+
+		// scope_core is immutable, so compile stuff inline
+		if (op == OP_FIND && last->op == OP_LIT && last->item.type == STRING) {
+			item_t val = map_get(vm, &vm->scope_core, last->item);
+			if (val.type != NIL) {
+				last->item = val;
+				op = OP_NOP;
+			}
+		}
+	}
+
 	code_t* c = &vm->code.cells[vm->code.depth++];
 	c->op = op;
 	c->item.type = 0;
 	c->item.inum = 0;
-	// todo peephole
 	return c;
 }
 
@@ -872,7 +886,7 @@ static int parse_block(rela_vm* vm, char *source, node_t *node) {
 		vec_push(vm, &node->vals, pop(vm));
 	}
 
-	ensure(vm, found_end, "expected keyword 'end': %s", source);
+	ensure(vm, found_end, "expected keyword 'end': %s", &source[offset]);
 	return offset;
 }
 
@@ -922,7 +936,7 @@ static int parse_branch(rela_vm* vm, char *source, node_t *node) {
 		}
 	}
 
-	ensure(vm, found_else || found_end, "expected keyword 'else' or 'end': %s", source);
+	ensure(vm, found_else || found_end, "expected keyword 'else' or 'end': %s", &source[offset]);
 
 	if (vec_size(vm, &node->vals))
 		vec_cell(vm, &node->vals, vec_size(vm, &node->vals)-1)->node->results = 1;
@@ -946,7 +960,7 @@ static int parse_arglist(rela_vm* vm, char *source) {
 			offset += skip_gap(&source[offset]);
 		}
 
-		ensure(vm, source[offset] == ')', "expected closing paren: %s", source);
+		ensure(vm, source[offset] == ')', "expected closing paren: %s", &source[offset]);
 		offset++;
 	}
 	else {
@@ -1211,7 +1225,7 @@ static int parse_node(rela_vm* vm, char *source) {
 			node->args = pop(vm).node;
 			offset += skip_gap(&source[offset]);
 		}
-		ensure(vm, source[offset] == ']', "expected closing bracket: %s", source);
+		ensure(vm, source[offset] == ']', "expected closing bracket: %s", &source[offset]);
 		offset++;
 	}
 	else
@@ -1334,7 +1348,7 @@ static int parse(rela_vm* vm, char *source, int results, int mode) {
 				arguments[argument++] = pop(vm).node;
 				arguments[argument-1]->results = 1;
 				offset += skip_gap(&source[offset]);
-				ensure(vm, source[offset] == ')', "expected closing paren: %s", source);
+				ensure(vm, source[offset] == ')', "expected closing paren: %s", &source[offset]);
 				offset++;
 			}
 			else {
@@ -1391,7 +1405,7 @@ static int parse(rela_vm* vm, char *source, int results, int mode) {
 		offset += skip_gap(&source[offset]);
 
 		if (source[offset] == '=') {
-			ensure(vm, vec_size(vm, &node->vals) > 0, "missing assignment name: %s", source);
+			ensure(vm, vec_size(vm, &node->vals) > 0, "missing assignment name: %s", &source[offset]);
 
 			offset++;
 			for (int i = 0; i < vec_size(vm, &node->vals); i++)
@@ -1409,7 +1423,7 @@ static int parse(rela_vm* vm, char *source, int results, int mode) {
 		break;
 	}
 
-	ensure(vm, vec_size(vm, &node->vals) > 0, "missing assignment value: %s", source);
+	ensure(vm, vec_size(vm, &node->vals) > 0, "missing assignment value: %s", &source[offset]);
 
 	push(vm, (item_t){.type = NODE, .node = node});
 	return offset;
@@ -1816,10 +1830,10 @@ static void op_print(rela_vm* vm) {
 	char tmp[100];
 	for (int i = 0; i < items; i++) {
 		char *str = tmptext(vm, *item++, tmp, sizeof(tmp));
-		fprintf(vm->stream_output, "%s%s", i ? "\t": "", str);
+		fprintf(stdout, "%s%s", i ? "\t": "", str);
 	}
-	fprintf(vm->stream_output, "\n");
-	fflush(vm->stream_output);
+	fprintf(stdout, "\n");
+	fflush(stdout);
 }
 
 static void op_scope(rela_vm* vm) {
@@ -2123,11 +2137,23 @@ static void op_assign(rela_vm* vm) {
 
 static void op_find(rela_vm* vm) {
 	item_t key = pop(vm);
+	vec_t* scopes = &routine(vm)->scopes;
 
-	map_t* reading = scope_reading(vm);
-	item_t val = map_get(vm, reading, key);
+	// this is less than ideal, but should be fixed with the stack locals plan
+	for (int i = 0, l = vec_size(vm, scopes); i < l; i++) {
+		map_t *scope = vec_get(vm, scopes, -i-1).map;
+		if (scope->smudged) continue;
 
-	if (val.type == NIL && reading != vm->scope_global) {
+		item_t val = map_get(vm, scope, key);
+		if (val.type == NIL) continue;
+
+		push(vm, val);
+		return;
+	}
+
+	item_t val = nil(vm);
+
+	if (val.type == NIL) {
 		val = map_get(vm, vm->scope_global, key);
 	}
 
@@ -2495,7 +2521,6 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
 	vm->custom = custom;
 	vm->memory_limit = memory;
-	vm->stream_output = stdout;
 
 	if (!vm) {
 		fprintf(stderr, "calloc\n");
