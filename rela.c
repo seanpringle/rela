@@ -45,7 +45,7 @@ enum opcode_t {
 	OP_JFALSE, OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT,
 	OP_ASSIGN, OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
 	OP_NOT, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SLURP, OP_SORT, OP_ASSERT,
-	OP_LGET, OP_LSET, OP_PID,
+	OP_PID,
 	OPERATIONS
 };
 
@@ -74,8 +74,8 @@ enum {
 	NODE_BUILTIN, NODE_VEC, NODE_MAP, NODE_FOR
 };
 
-#define STRTMP 100  // scratch space buffers
-#define STRBUF 1000 // strf, strcopy, strliteral
+#define STRTMP 100  // scratch space buffers on stack
+#define STRBUF 1000 // strf, strcopy, strliteral buffers on stack
 
 struct _vec_t;
 struct _map_t;
@@ -102,7 +102,7 @@ typedef struct {
 typedef struct _vec_t {
 	item_t* items;
 	int count;
-} vec_t;
+} vec_t; // vector
 
 typedef struct _map_t {
 	vec_t keys;
@@ -110,22 +110,22 @@ typedef struct _map_t {
 } map_t;
 
 typedef struct _cor_t {
-	vec_t stack;  // arguments, results
-	vec_t other;  // temporary data
+	vec_t stack;  // arguments, results, opcode working
+	vec_t other;  // temporary data moved off stack
 	vec_t maps;   // map literals during construction
-	vec_t locals; // local variables key/val pairs
-	vec_t calls;  // threading call/return, stack frames
-	vec_t loops;  // loop states
-	vec_t marks;  // mark/limits of stack data
+	vec_t locals; // local variable key/val pairs
+	vec_t calls;  // call/return stack frames
+	vec_t loops;  // loop state data
+	vec_t marks;  // mark/limits of stack subframes
 	vec_t paths;  // compile-time scope path
 	int ip;
 	int state;
-} cor_t;
+} cor_t; // coroutine
 
 typedef struct{
 	enum opcode_t op;
 	item_t item;
-} code_t;
+} code_t; // compiled "bytecode"
 
 typedef struct _node_t {
 	int type;
@@ -144,7 +144,7 @@ typedef struct _node_t {
 		int ids[8];
 		int depth;
 	} fpath;
-} node_t;
+} node_t; // AST
 
 typedef struct {
 	char *name;
@@ -153,12 +153,12 @@ typedef struct {
 
 keyword_t keywords[] = {
 	{ .name = "global", .opcode = OP_GLOBAL },
-	{ .name = "true", .opcode = OP_TRUE },
-	{ .name = "false", .opcode = OP_FALSE },
-	{ .name = "nil", .opcode = OP_NIL },
+	{ .name = "true",   .opcode = OP_TRUE   },
+	{ .name = "false",  .opcode = OP_FALSE  },
+	{ .name = "nil",    .opcode = OP_NIL    },
 	{ .name = "assert", .opcode = OP_ASSERT },
-	{ .name = "sort", .opcode = OP_SORT },
-	{ .name = "slurp", .opcode = OP_SLURP },
+	{ .name = "sort",   .opcode = OP_SORT   },
+	{ .name = "slurp",  .opcode = OP_SLURP  },
 };
 
 typedef struct {
@@ -186,10 +186,7 @@ operator_t operators[] = {
 	{ .name = "%",   .precedence = 4, .opcode = OP_MOD,   .argc = 2 },
 };
 
-typedef struct {
-	char *name;
-	int opcode;
-} modifier_t;
+typedef keyword_t modifier_t;
 
 modifier_t modifiers[] = {
 	{ .name = "#", .opcode = OP_COUNT },
@@ -202,36 +199,42 @@ typedef struct {
 	size_t bytes;
 } allocation_t;
 
+// https://en.wikipedia.org/wiki/Region-based_memory_management
 typedef struct {
-	allocation_t* cells;
-	size_t bytes;
-	size_t depth;
-	size_t start;
+	allocation_t* cells; // allocation stack
+	size_t depth; // of the allocation stack
+	size_t bytes; // sum of allocation.bytes
+	size_t start; // depth after region_truncate
 } region_t;
 
 typedef struct _rela_vm {
-	void* custom;
-	size_t memory_limit;
+	// routines[0] == main coroutine, always set
+	// routines[1...n] resume/yield chain
+	vec_t routines;
 
 	map_t scope_core;
 	map_t* scope_global;
-	vec_t routines;
 
+	size_t memory_limit;
+	region_t general;
+	region_t prepare;
+	region_t vectors;
+
+	// compiled "bytecode"
 	struct {
 		code_t* cells;
 		int depth;
 		int start;
 	} code;
 
-	region_t general;
-	region_t prepare;
-
+	// interned strings
 	struct {
 		char** cells;
 		int depth;
 		int start;
 	} strings;
 
+	// compile-time scope tree
 	struct {
 		int id;
 		int ids[8];
@@ -240,6 +243,7 @@ typedef struct _rela_vm {
 
 	jmp_buf jmp;
 	char err[STRTMP];
+	void* custom;
 } rela_vm;
 
 typedef void (*opcb)(rela_vm*);
@@ -277,32 +281,27 @@ static int parse_node(rela_vm* vm, const char *source);
 #define COR_RUNNING 1
 #define COR_DEAD 2
 
-static void* region_alloc(region_t* region, size_t bytes) {
+static void* region_allot(region_t* region, size_t bytes) {
 	void* ptr = calloc(bytes,1);
 	if (!ptr) exit(1);
-
 	// trust the allocator not to move us unless necessary
 	region->cells = realloc(region->cells, (region->depth+1) * sizeof(allocation_t));
 	region->cells[region->depth++] = (allocation_t){.ptr = ptr, .bytes = bytes};
-
 	region->bytes += bytes;
 	return ptr;
 }
 
-static void* region_realloc(region_t* region, void* ptr, size_t bytes) {
+static void* region_reallot(region_t* region, void* ptr, size_t bytes) {
 	for (int i = (int)region->depth-1; i >= 0; --i) {
 		allocation_t* allocation = &region->cells[i];
-
-		if (allocation->ptr == ptr) {
-			if (bytes <= allocation->bytes) break;
-
-			assert(region->bytes >= allocation->bytes);
-			region->bytes -= allocation->bytes;
-			allocation->ptr = realloc(ptr, bytes);
-			allocation->bytes = bytes;
-			region->bytes += allocation->bytes;
-			return allocation->ptr;
-		}
+		if (allocation->ptr != ptr) continue;
+		if (bytes <= allocation->bytes) break;
+		assert(region->bytes >= allocation->bytes);
+		region->bytes -= allocation->bytes;
+		allocation->ptr = realloc(ptr, bytes);
+		allocation->bytes = bytes;
+		region->bytes += allocation->bytes;
+		return allocation->ptr;
 	}
 	return ptr;
 }
@@ -318,18 +317,12 @@ static void region_truncate(region_t* region) {
 }
 
 static void* allot(rela_vm* vm, size_t bytes) {
-	void* ptr = region_alloc(&vm->general, bytes);
-	ensure(vm, vm->general.bytes <= vm->memory_limit, "out of memory");
+	void* ptr = region_allot(&vm->general, bytes);
+	ensure(vm, vm->general.bytes + vm->vectors.bytes <= vm->memory_limit, "out of memory");
 	return ptr;
 }
 
-static void* reallot(rela_vm* vm, void* ptr, size_t bytes) {
-	ptr = region_realloc(&vm->general, ptr, bytes);
-	ensure(vm, vm->general.bytes <= vm->memory_limit, "out of memory");
-	return ptr;
-}
-
-static vec_t* vec_alloc(rela_vm* vm) {
+static vec_t* vec_allot(rela_vm* vm) {
 	vec_t* vec = allot(vm, sizeof(vec_t));
 	vec->items = NULL;
 	vec->count = 0;
@@ -345,7 +338,7 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 
 	if (!vec->items) {
 		assert(vec->count == 0);
-		vec->items = allot(vm, sizeof(item_t) * 8);
+		vec->items = region_allot(&vm->vectors, sizeof(item_t) * 8);
 	}
 
 	vec->count++;
@@ -354,13 +347,14 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 	bool power_of_2 = size > 0 && (size & (size - 1)) == 0;
 
 	if (power_of_2 && size >= 8)
-		vec->items = reallot(vm, vec->items, sizeof(item_t) * (size * 2));
+		vec->items = region_reallot(&vm->vectors, vec->items, sizeof(item_t) * (size * 2));
 
 	if (index < vec->count-1)
 		memmove(&vec->items[index+1], &vec->items[index], (vec->count - index - 1) * sizeof(item_t));
 
 	vec->items[index].type = NIL;
 
+	ensure(vm, vm->general.bytes + vm->vectors.bytes <= vm->memory_limit, "out of memory");
 	return &vec->items[index];
 }
 
@@ -450,7 +444,7 @@ static void vec_clear(rela_vm* vm, vec_t* vec) {
 	vec->count = 0;
 }
 
-static map_t* map_alloc(rela_vm* vm) {
+static map_t* map_allot(rela_vm* vm) {
 	return allot(vm, sizeof(map_t));
 }
 
@@ -496,9 +490,12 @@ static void map_set(rela_vm* vm, map_t* map, item_t key, item_t val) {
 	}
 }
 
-static int str_lower_bound(rela_vm* vm, const char* str) {
+static const char* strintern(rela_vm* vm, const char* str) {
+	ensure(vm, str, "strintern() null string");
+
 	int size = vm->strings.depth;
 	int index = 0;
+
 	if (size) {
 		int lower = 0;
 		int upper = size-1;
@@ -510,18 +507,6 @@ static int str_lower_bound(rela_vm* vm, const char* str) {
 			if (c < 0) lower = i+1; else upper = i-1;
 			index = lower;
 		}
-	}
-	return index;
-}
-
-static const char* strintern(rela_vm* vm, const char* str) {
-	ensure(vm, str, "strintern() null string");
-
-	int size = vm->strings.depth;
-	int index = 0;
-
-	if (size) {
-		index = str_lower_bound(vm, str);
 
 		if (index < vm->strings.depth && vm->strings.cells[index] == str) {
 			return str;
@@ -622,6 +607,7 @@ static int str_scan(const char *source, strcb cb) {
 static void reset(rela_vm* vm) {
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
 	region_truncate(&vm->general);
+	region_truncate(&vm->vectors);
 	vm->scope_global = NULL;
 }
 
@@ -753,7 +739,7 @@ static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	return tmp;
 }
 
-static cor_t* cor_alloc(rela_vm* vm) {
+static cor_t* cor_allot(rela_vm* vm) {
 	return allot(vm, sizeof(cor_t));
 }
 
@@ -842,8 +828,8 @@ static int peek(const char *source, char *name) {
 	return !strncmp(source, name, len) && !isname(source[len]);
 }
 
-static node_t* node_alloc(rela_vm* vm) {
-	return region_alloc(&vm->prepare, sizeof(node_t));
+static node_t* node_allot(rela_vm* vm) {
+	return region_allot(&vm->prepare, sizeof(node_t));
 }
 
 static int parse_block(rela_vm* vm, const char *source, node_t *node) {
@@ -972,7 +958,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 	if (modifier) {
 		offset += strlen(modifier->name);
 		offset += parse_node(vm, &source[offset]);
-		node_t* outer = node_alloc(vm);
+		node_t* outer = node_allot(vm);
 		outer->type = NODE_OPCODE;
 		outer->opcode = modifier->opcode;
 		outer->args = pop(vm).node;
@@ -981,7 +967,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 		return offset;
 	}
 
-	node_t *node = node_alloc(vm);
+	node_t *node = node_allot(vm);
 
 	if (isnamefirst(source[offset])) {
 		node->type = NODE_NAME;
@@ -1009,7 +995,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
 				node->args = pop(vm).node;
 
-				// then block, optional else
+				// block, optional else
 				offset += parse_branch(vm, &source[offset], node);
 			}
 			else
@@ -1021,7 +1007,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
 				node->args = pop(vm).node;
 
-				// do block
+				// block
 				offset += parse_block(vm, &source[offset], node);
 			}
 			else
@@ -1052,7 +1038,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
 				node->args = pop(vm).node;
 
-				// do block
+				// block
 				offset += parse_block(vm, &source[offset], node);
 			}
 			else
@@ -1101,7 +1087,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 
 						length = str_skip(&source[offset], isname);
 
-						node_t *param = node_alloc(vm);
+						node_t *param = node_allot(vm);
 						param->type = NODE_NAME;
 						param->item = string(vm, substr(vm, &source[offset], 0, length));
 						vec_push(vm, &node->keys, (item_t){.type = NODE, .node = param});
@@ -1110,7 +1096,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 					}
 				}
 
-				// do block
+				// block
 				offset += parse_block(vm, &source[offset], node);
 
 				assert(vm->fpath.depth > 0);
@@ -1263,7 +1249,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			// a nested vecmap[...] or already have its own arguments so
 			// chain extra OP_CALLs.
 			if (prev->index || prev->call || prev->args) {
-				node_t* call = node_alloc(vm);
+				node_t* call = node_allot(vm);
 				call->type = NODE_OPCODE;
 				call->opcode = OP_CALL;
 				call->args = pop(vm).node;
@@ -1309,7 +1295,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 	int length = 0;
 	int offset = skip_gap(source);
 
-	node_t *node = node_alloc(vm);
+	node_t *node = node_allot(vm);
 	node->type = NODE_MULTI;
 	node->results = results;
 
@@ -1362,7 +1348,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 
 			while (operation > 0 && operations[operation-1]->precedence >= compare->precedence) {
 				operator_t *consume = operations[--operation];
-				node_t *result = node_alloc(vm);
+				node_t *result = node_allot(vm);
 				result->type   = NODE_OPCODE;
 				result->opcode = consume->opcode;
 				ensure(vm, argument >= consume->argc, "operator %s insufficient arguments", consume->name);
@@ -1378,7 +1364,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 
 		while (operation && argument) {
 			operator_t *consume = operations[--operation];
-			node_t *result = node_alloc(vm);
+			node_t *result = node_allot(vm);
 			result->type   = NODE_OPCODE;
 			result->opcode = consume->opcode;
 			ensure(vm, argument >= consume->argc, "operator %s insufficient arguments", consume->name);
@@ -1675,7 +1661,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_LIMIT)->item = integer(vm, node->results);
 	}
 	else
-	// if expression (returns a value for ternary style)
+	// if expression ... [else ...] end
+	// (returns a value for ternary style assignment)
 	if (node->type == NODE_IF) {
 		assert(&node->vals);
 
@@ -1709,7 +1696,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		}
 	}
 	else
-	// while ... do ... end
+	// while expression ... end
 	if (node->type == NODE_WHILE) {
 		assert(&node->vals);
 
@@ -1737,7 +1724,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_LIMIT);
 	}
 	else
-	// for ... in ... do ... end
+	// for k,v in container ... end
 	if (node->type == NODE_FOR) {
 		compile(vm, OP_MARK);
 
@@ -1757,7 +1744,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		// OP_FOR expects a vector with key[,val] variable names
 		iter->item = (item_t){.type = VECTOR, .vec = &node->keys};
 
-		// do block
+		// block
 		for (int i = 0; i < vec_size(vm, &node->vals); i++)
 			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
 
@@ -1810,7 +1797,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	}
 }
 
-static void source (rela_vm* vm, const char *source) {
+static void source(rela_vm* vm, const char *source) {
 	int offset = skip_gap(source);
 
 	while (source[offset])
@@ -1850,7 +1837,7 @@ static void op_print(rela_vm* vm) {
 }
 
 static void op_map(rela_vm* vm) {
-	vec_push(vm, &routine(vm)->maps, (item_t){.type = MAP, .map = map_alloc(vm)});
+	vec_push(vm, &routine(vm)->maps, (item_t){.type = MAP, .map = map_allot(vm)});
 }
 
 static void op_unmap(rela_vm* vm) {
@@ -1887,7 +1874,7 @@ static void depart(rela_vm* vm) {
 }
 
 static void op_coroutine(rela_vm* vm) {
-	cor_t *cor = cor_alloc(vm);
+	cor_t *cor = cor_allot(vm);
 
 	int ip = pop_type(vm, SUBROUTINE).sub;
 
@@ -2069,7 +2056,7 @@ static void op_or(rela_vm* vm) {
 static void op_vector(rela_vm* vm) {
 	int items = depth(vm);
 
-	vec_t* vec = vec_alloc(vm);
+	vec_t* vec = vec_allot(vm);
 
 	for (int i = 0; i < items; i++)
 		vec_push(vm, vec, vec_get(vm, stack(vm), vec_size(vm, stack(vm)) - items + i));
@@ -2163,6 +2150,26 @@ static bool find(rela_vm* vm, item_t key, item_t* val) {
 	return false;
 }
 
+static void op_assign(rela_vm* vm) {
+	item_t key = pop(vm);
+
+	int index = literal_int(vm);
+	// indexed from the base of the current marked frame
+	item_t val = index < depth(vm) ? *item(vm, -depth(vm)+index): nil(vm);
+
+	assign(vm, key, val);
+}
+
+static void op_find(rela_vm* vm) {
+	item_t key = pop(vm);
+	item_t val = nil(vm);
+
+	char tmp[STRTMP];
+	ensure(vm, find(vm, key, &val), "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+
+	push(vm, val);
+}
+
 static void op_for(rela_vm* vm) {
 	assert(literal(vm).type == VECTOR);
 
@@ -2220,32 +2227,6 @@ static void op_for(rela_vm* vm) {
 	else {
 		routine(vm)->ip = quit;
 	}
-}
-
-static void op_assign(rela_vm* vm) {
-	item_t key = pop(vm);
-
-	int index = literal_int(vm);
-	// indexed from the base of the current marked frame
-	item_t val = index < depth(vm) ? *item(vm, -depth(vm)+index): nil(vm);
-
-	assign(vm, key, val);
-}
-
-static void op_find(rela_vm* vm) {
-	item_t key = pop(vm);
-	item_t val = nil(vm);
-
-	char tmp[STRTMP];
-	ensure(vm, find(vm, key, &val), "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
-
-	push(vm, val);
-}
-
-static void op_lget(rela_vm* vm) {
-}
-
-static void op_lset(rela_vm* vm) {
 }
 
 static void op_set(rela_vm* vm) {
@@ -2378,26 +2359,21 @@ static void op_gte(rela_vm* vm) {
 static void op_concat(rela_vm* vm) {
 	item_t b = pop(vm);
 	item_t a = pop(vm);
-
 	char tmpA[STRTMP];
 	char tmpB[STRTMP];
 
 	const char *as = tmptext(vm, a, tmpA, sizeof(tmpA));
 	const char *bs = tmptext(vm, b, tmpB, sizeof(tmpB));
-
-	char buf[STRBUF];
-
 	int lenA = strlen(as);
 	int lenB = strlen(bs);
 
 	ensure(vm, lenA+lenB < STRBUF, "op_concat max length exceeded (%d bytes)", STRBUF-1);
 
+	char buf[STRBUF];
 	char* ap = buf+0;
 	char* bp = buf+lenA;
-
 	memcpy(ap, as, lenA);
 	memcpy(bp, bs, lenB);
-
 	buf[lenA+lenB] = 0;
 
 	push(vm, string(vm, buf));
@@ -2501,63 +2477,61 @@ static void op_assert(rela_vm* vm) {
 }
 
 func_t funcs[OPERATIONS] = {
-	[OP_NOP] = { .name = "nop", .func = op_nop },
-	[OP_PRINT] = { .name = "print", .func = op_print },
+	[OP_NOP]       = { .name = "nop",       .func = op_nop       },
+	[OP_PRINT]     = { .name = "print",     .func = op_print     },
 	[OP_COROUTINE] = { .name = "coroutine", .func = op_coroutine },
-	[OP_RESUME] = { .name = "resume", .func = op_resume },
-	[OP_YIELD] = { .name = "yield", .func = op_yield },
-	[OP_CALL] = { .name = "call", .func = op_call },
-	[OP_RETURN] = { .name = "return", .func = op_return },
-	[OP_GLOBAL] = { .name = "global", .func = op_global },
-	[OP_VECTOR] = { .name = "vector", .func = op_vector },
-	[OP_MAP] = { .name = "scope", .func = op_map },
-	[OP_UNMAP] = { .name = "unmap", .func = op_unmap },
-	[OP_MARK] = { .name = "mark", .func = op_mark },
-	[OP_LIMIT] = { .name = "limit", .func = op_limit },
-	[OP_LOOP] = { .name = "loop", .func = op_loop },
-	[OP_UNLOOP] = { .name = "unloop", .func = op_unloop },
-	[OP_CLEAN] = { .name = "clean", .func = op_clean },
-	[OP_BREAK] = { .name = "break", .func = op_break },
-	[OP_CONTINUE] = { .name = "continue", .func = op_continue },
-	[OP_AND] = { .name = "and", .func = op_and },
-	[OP_OR] = { .name = "or", .func = op_or },
-	[OP_JMP] = { .name = "jmp", .func = op_jmp },
-	[OP_JFALSE] = { .name = "jfalse", .func = op_jfalse },
-	[OP_JTRUE] = { .name = "jtrue", .func = op_jtrue },
-	[OP_FOR] = { .name = "for", .func = op_for },
-	[OP_NIL] = { .name = "nil", .func = op_nil },
-	[OP_SHUNT] = { .name = "shunt", .func = op_shunt },
-	[OP_SHIFT] = { .name = "shift", .func = op_shift },
-	[OP_TRUE] = { .name = "true", .func = op_true },
-	[OP_FALSE] = { .name = "false", .func = op_false },
-	[OP_LIT] = { .name = "lit", .func = op_lit },
-	[OP_ASSIGN] = { .name = "assign", .func = op_assign },
-	[OP_FIND] = { .name = "find", .func = op_find },
-	[OP_SET] = { .name = "set", .func = op_set },
-	[OP_GET] = { .name = "get", .func = op_get },
-	[OP_COUNT] = { .name = "count", .func = op_count },
-	[OP_DROP] = { .name = "drop", .func = op_drop },
-	[OP_ADD] = { .name = "add", .func = op_add },
-	[OP_NEG] = { .name = "neg", .func = op_neg },
-	[OP_SUB] = { .name = "sub", .func = op_sub },
-	[OP_MUL] = { .name = "mul", .func = op_mul },
-	[OP_DIV] = { .name = "div", .func = op_div },
-	[OP_MOD] = { .name = "mod", .func = op_mod },
-	[OP_NOT] = { .name = "not", .func = op_not },
-	[OP_EQ] = { .name = "eq", .func = op_eq },
-	[OP_NE] = { .name = "ne", .func = op_ne },
-	[OP_LT] = { .name = "lt", .func = op_lt },
-	[OP_LTE] = { .name = "lte", .func = op_lte },
-	[OP_GT] = { .name = "gt", .func = op_gt },
-	[OP_GTE] = { .name = "gte", .func = op_gte },
-	[OP_CONCAT] = { .name = "concat", .func = op_concat },
-	[OP_MATCH] = { .name = "match", .func = op_match },
-	[OP_SLURP] = { .name = "slurp", .func = op_slurp },
-	[OP_SORT] = { .name = "sort", .func = op_sort },
-	[OP_LGET] = { .name = "lget", .func = op_lget },
-	[OP_LSET] = { .name = "lset", .func = op_lset },
-	[OP_PID] = { .name = "pid", .func = op_pid },
-	[OP_ASSERT] = { .name = "assert", .func = op_assert },
+	[OP_RESUME]    = { .name = "resume",    .func = op_resume    },
+	[OP_YIELD]     = { .name = "yield",     .func = op_yield     },
+	[OP_CALL]      = { .name = "call",      .func = op_call      },
+	[OP_RETURN]    = { .name = "return",    .func = op_return    },
+	[OP_GLOBAL]    = { .name = "global",    .func = op_global    },
+	[OP_VECTOR]    = { .name = "vector",    .func = op_vector    },
+	[OP_MAP]       = { .name = "scope",     .func = op_map       },
+	[OP_UNMAP]     = { .name = "unmap",     .func = op_unmap     },
+	[OP_MARK]      = { .name = "mark",      .func = op_mark      },
+	[OP_LIMIT]     = { .name = "limit",     .func = op_limit     },
+	[OP_LOOP]      = { .name = "loop",      .func = op_loop      },
+	[OP_UNLOOP]    = { .name = "unloop",    .func = op_unloop    },
+	[OP_CLEAN]     = { .name = "clean",     .func = op_clean     },
+	[OP_BREAK]     = { .name = "break",     .func = op_break     },
+	[OP_CONTINUE]  = { .name = "continue",  .func = op_continue  },
+	[OP_AND]       = { .name = "and",       .func = op_and       },
+	[OP_OR]        = { .name = "or",        .func = op_or        },
+	[OP_JMP]       = { .name = "jmp",       .func = op_jmp       },
+	[OP_JFALSE]    = { .name = "jfalse",    .func = op_jfalse    },
+	[OP_JTRUE]     = { .name = "jtrue",     .func = op_jtrue     },
+	[OP_FOR]       = { .name = "for",       .func = op_for       },
+	[OP_NIL]       = { .name = "nil",       .func = op_nil       },
+	[OP_SHUNT]     = { .name = "shunt",     .func = op_shunt     },
+	[OP_SHIFT]     = { .name = "shift",     .func = op_shift     },
+	[OP_TRUE]      = { .name = "true",      .func = op_true      },
+	[OP_FALSE]     = { .name = "false",     .func = op_false     },
+	[OP_LIT]       = { .name = "lit",       .func = op_lit       },
+	[OP_ASSIGN]    = { .name = "assign",    .func = op_assign    },
+	[OP_FIND]      = { .name = "find",      .func = op_find      },
+	[OP_SET]       = { .name = "set",       .func = op_set       },
+	[OP_GET]       = { .name = "get",       .func = op_get       },
+	[OP_COUNT]     = { .name = "count",     .func = op_count     },
+	[OP_DROP]      = { .name = "drop",      .func = op_drop      },
+	[OP_ADD]       = { .name = "add",       .func = op_add       },
+	[OP_NEG]       = { .name = "neg",       .func = op_neg       },
+	[OP_SUB]       = { .name = "sub",       .func = op_sub       },
+	[OP_MUL]       = { .name = "mul",       .func = op_mul       },
+	[OP_DIV]       = { .name = "div",       .func = op_div       },
+	[OP_MOD]       = { .name = "mod",       .func = op_mod       },
+	[OP_NOT]       = { .name = "not",       .func = op_not       },
+	[OP_EQ]        = { .name = "eq",        .func = op_eq        },
+	[OP_NE]        = { .name = "ne",        .func = op_ne        },
+	[OP_LT]        = { .name = "lt",        .func = op_lt        },
+	[OP_LTE]       = { .name = "lte",       .func = op_lte       },
+	[OP_GT]        = { .name = "gt",        .func = op_gt        },
+	[OP_GTE]       = { .name = "gte",       .func = op_gte       },
+	[OP_CONCAT]    = { .name = "concat",    .func = op_concat    },
+	[OP_MATCH]     = { .name = "match",     .func = op_match     },
+	[OP_SLURP]     = { .name = "slurp",     .func = op_slurp     },
+	[OP_SORT]      = { .name = "sort",      .func = op_sort      },
+	[OP_PID]       = { .name = "pid",       .func = op_pid       },
+	[OP_ASSERT]    = { .name = "assert",    .func = op_assert    },
 };
 
 static void decompile(rela_vm* vm, code_t* c) {
@@ -2579,16 +2553,15 @@ static int run(rela_vm* vm) {
 		return wtf;
 	}
 
-	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_alloc(vm)});
+	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_allot(vm)});
 	routine(vm)->ip = vm->code.start;
 
-	vm->scope_global = map_alloc(vm);
+	vm->scope_global = map_allot(vm);
 
 	for (;;) {
 		int ip = routine(vm)->ip++;
 		if (ip < 0 || ip >= vm->code.depth) break;
 		funcs[vm->code.cells[ip].op].func(vm);
-
 //		char tmp[STRTMP];
 //		fprintf(stderr, "ip %d ", ip);
 //		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
@@ -2606,23 +2579,22 @@ static void destroy(rela_vm* vm) {
 	}
 
 	vm->general.start = 0;
+	vm->vectors.start = 0;
 	reset(vm);
 	free(vm->code.cells);
 	free(vm->general.cells);
 	free(vm->prepare.cells);
 	free(vm->strings.cells);
+	free(vm->vectors.cells);
 	free(vm);
 }
 
 static rela_vm* create(const char* src, size_t memory, void* custom, size_t registrations, const rela_register* registry) {
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
+	if (!vm) exit(1);
+
 	vm->custom = custom;
 	vm->memory_limit = memory;
-
-	if (!vm) {
-		fprintf(stderr, "calloc\n");
-		return NULL;
-	}
 
 	if (setjmp(vm->jmp)) {
 		fprintf(stderr, "%s\n", vm->err);
@@ -2644,7 +2616,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 		);
 	}
 
-	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_alloc(vm)});
+	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_allot(vm)});
 	op_mark(vm);
 	routine(vm)->ip = vm->code.depth;
 	push(vm, string(vm, (char*)src)); // shouldn't intern the src
@@ -2660,6 +2632,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 
 	vm->general.start = vm->general.depth;
 	vm->strings.start = vm->strings.depth;
+	vm->vectors.start = vm->vectors.depth;
 	region_truncate(&vm->prepare);
 	return vm;
 }
