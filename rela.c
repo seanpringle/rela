@@ -104,7 +104,6 @@ typedef struct _vec_t {
 typedef struct _map_t {
 	vec_t keys;
 	vec_t vals;
-	bool immutable; // keys may only be written once
 } map_t;
 
 typedef struct _cor_t {
@@ -139,7 +138,7 @@ typedef struct _node_t {
 	int results;
 	struct {
 		int id;
-		int ids[32];
+		int ids[8];
 		int depth;
 	} fpath;
 } node_t;
@@ -200,10 +199,16 @@ typedef struct {
 	size_t bytes;
 } allocation_t;
 
+typedef struct {
+	allocation_t* cells;
+	size_t bytes;
+	size_t depth;
+	size_t start;
+} region_t;
+
 typedef struct _rela_vm {
 	void* custom;
 	size_t memory_limit;
-	size_t memory_usage;
 
 	map_t scope_core;
 	map_t* scope_global;
@@ -215,22 +220,18 @@ typedef struct _rela_vm {
 		int start;
 	} code;
 
-	struct {
-		allocation_t* cells;
-		int depth;
-		int limit;
-		int start;
-	} allocations;
+	region_t general;
+	region_t prepare;
 
 	struct {
-		char* cells[1024];
+		char** cells;
 		int depth;
 		int start;
 	} strings;
 
 	struct {
 		int id;
-		int ids[32];
+		int ids[8];
 		int depth;
 	} fpath;
 
@@ -273,49 +274,73 @@ static int parse_node(rela_vm* vm, char *source);
 #define COR_RUNNING 1
 #define COR_DEAD 2
 
-static void* allot(rela_vm* vm, size_t bytes) {
-	assert(vm->memory_usage <= vm->memory_limit);
-	ensure(vm, vm->memory_usage+bytes <= vm->memory_limit, "out of memory");
-
+static void* region_alloc(region_t* region, size_t bytes) {
 	void* ptr = calloc(bytes,1);
-	ensure(vm, ptr, "calloc");
+	if (!ptr) exit(1);
 
-	if (!vm->allocations.cells) {
-		vm->allocations.depth = 0;
-		vm->allocations.limit = 128;
-		vm->allocations.cells = malloc(vm->allocations.limit * sizeof(allocation_t));
+	// trust the allocator not to move us unless necessary
+	region->cells = realloc(region->cells, (region->depth+1) * sizeof(allocation_t));
+	region->cells[region->depth++] = (allocation_t){.ptr = ptr, .bytes = bytes};
+
+	region->bytes += bytes;
+	return ptr;
+}
+
+static void* region_realloc(region_t* region, void* ptr, size_t bytes) {
+	for (int i = (int)region->depth-1; i >= 0; --i) {
+		allocation_t* allocation = &region->cells[i];
+
+		if (allocation->ptr == ptr) {
+			if (bytes <= allocation->bytes) break;
+
+			assert(region->bytes >= allocation->bytes);
+			region->bytes -= allocation->bytes;
+			allocation->ptr = realloc(ptr, bytes);
+			allocation->bytes = bytes;
+			region->bytes += allocation->bytes;
+			return allocation->ptr;
+		}
 	}
+	return ptr;
+}
 
-	if (vm->allocations.depth == vm->allocations.limit) {
-		vm->allocations.limit *= 2;
-		vm->allocations.cells = realloc(vm->allocations.cells, vm->allocations.limit * sizeof(allocation_t));
+static void region_free(region_t* region, void* ptr) {
+	for (int i = (int)region->depth-1; i >= 0; --i) {
+		allocation_t* allocation = &region->cells[i];
+		if (allocation->ptr == ptr) {
+			free(ptr);
+			allocation->ptr = NULL;
+			allocation->bytes = 0;
+			assert(region->bytes >= allocation->bytes);
+			region->bytes -= allocation->bytes;
+			// only shrink the region if discarding the last allot
+			while (region->depth > region->start && !region->cells[region->depth-1].ptr)
+				region->depth--;
+			return;
+		}
 	}
+}
 
-	vm->allocations.cells[vm->allocations.depth++] = (allocation_t){.ptr = ptr, .bytes = bytes};
-	vm->memory_usage += bytes;
+static void region_truncate(region_t* region) {
+	while (region->depth > region->start) {
+		allocation_t* allocation = &region->cells[--region->depth];
+		free(allocation->ptr);
+		assert(region->bytes >= allocation->bytes);
+		region->bytes -= allocation->bytes;
+	}
+	region->depth = region->start;
+}
+
+static void* allot(rela_vm* vm, size_t bytes) {
+	void* ptr = region_alloc(&vm->general, bytes);
+	ensure(vm, vm->general.bytes <= vm->memory_limit, "out of memory");
 	return ptr;
 }
 
 static void* reallot(rela_vm* vm, void* ptr, size_t bytes) {
-	assert(vm->memory_usage <= vm->memory_limit);
-
-	for (int i = (int)vm->allocations.depth-1; i >= 0; --i) {
-		allocation_t* allocation = &vm->allocations.cells[i];
-
-		if (allocation->ptr == ptr) {
-			assert(vm->memory_usage >= allocation->bytes);
-			ensure(vm, vm->memory_usage-allocation->bytes+bytes <= vm->memory_limit, "out of memory");
-			vm->memory_usage -= allocation->bytes;
-			allocation->ptr = realloc(ptr, bytes);
-			assert(allocation->ptr);
-			allocation->bytes = bytes;
-			vm->memory_usage += allocation->bytes;
-			return allocation->ptr;
-		}
-	}
-
-	ensure(vm, 0, "bad reallot");
-	return NULL;
+	ptr = region_realloc(&vm->general, ptr, bytes);
+	ensure(vm, vm->general.bytes <= vm->memory_limit, "out of memory");
+	return ptr;
 }
 
 static void discard(rela_vm* vm, void* ptr) {
@@ -323,24 +348,7 @@ static void discard(rela_vm* vm, void* ptr) {
 	for (int i = (int)vm->strings.depth-1; i >= 0; --i) {
 		if (vm->strings.cells[i] == ptr) return;
 	}
-
-	for (int i = (int)vm->allocations.depth-1; i >= 0; --i) {
-		allocation_t* allocation = &vm->allocations.cells[i];
-
-		if (allocation->ptr == ptr) {
-			assert(vm->memory_usage >= allocation->bytes);
-			vm->memory_usage -= allocation->bytes;
-			free(allocation->ptr);
-			allocation->ptr = NULL;
-			allocation->bytes = 0;
-			// only shrink the region if discarding the last allot
-			while (vm->allocations.depth > 0 && !vm->allocations.cells[vm->allocations.depth-1].ptr)
-				vm->allocations.depth--;
-			return;
-		}
-	}
-
-	ensure(vm, 0, "bad discard");
+	region_free(&vm->general, ptr);
 }
 
 static vec_t* vec_alloc(rela_vm* vm) {
@@ -488,10 +496,8 @@ static bool map_get(rela_vm* vm, map_t* map, item_t key, item_t* val) {
 }
 
 static void map_clr(rela_vm* vm, map_t* map, item_t key) {
-	char tmp[100];
 	int i = map_lower_bound(vm, map, key);
 	if (i < vec_size(vm, &map->keys) && equal(vm, vec_get(vm, &map->keys, i), key)) {
-		ensure(vm, !map->immutable, "attempt to remove immutable key: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 		vec_del(vm, &map->keys, i);
 		vec_del(vm, &map->vals, i);
 	}
@@ -502,10 +508,8 @@ static void map_set(rela_vm* vm, map_t* map, item_t key, item_t val) {
 		map_clr(vm, map, key);
 		return;
 	}
-	char tmp[100];
 	int i = map_lower_bound(vm, map, key);
 	if (i < vec_size(vm, &map->keys) && equal(vm, vec_get(vm, &map->keys, i), key)) {
-		ensure(vm, !map->immutable, "attempt to change immutable key: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 		vec_cell(vm, &map->vals, i)[0] = val;
 	}
 	else {
@@ -543,6 +547,7 @@ static char* strintern(rela_vm* vm, char* str) {
 	}
 
 	vm->strings.depth++;
+	vm->strings.cells = realloc(vm->strings.cells, vm->strings.depth * sizeof(char*));
 	assert(index >= 0 && index < vm->strings.depth);
 
 	if (index == vm->strings.depth-1) {
@@ -558,15 +563,7 @@ static char* strintern(rela_vm* vm, char* str) {
 
 static void reset(rela_vm* vm) {
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
-
-	for (int i = vm->allocations.start; i < vm->allocations.depth; i++) {
-		allocation_t* allocation = &vm->allocations.cells[i];
-		free(allocation->ptr);
-		allocation->ptr = NULL;
-		allocation->bytes = 0;
-	}
-
-	vm->allocations.depth = vm->allocations.start;
+	region_truncate(&vm->general);
 	vm->scope_global = NULL;
 }
 
@@ -783,21 +780,6 @@ static code_t* compile(rela_vm* vm, int op) {
 	if (vm->code.depth%1024 == 0) {
 		vm->code.cells = realloc(vm->code.cells, (vm->code.depth+1024) * sizeof(code_t));
 	}
-
-	// some peephole
-	if (vm->code.depth) {
-		code_t* last = &vm->code.cells[vm->code.depth-1];
-
-		// scope_core is immutable, so compile stuff inline
-		if (op == OP_FIND && last->op == OP_LIT && last->item.type == STRING) {
-			item_t val = nil(vm);
-			if (map_get(vm, &vm->scope_core, last->item, &val)) {
-				last->item = val;
-				op = OP_NOP;
-			}
-		}
-	}
-
 	code_t* c = &vm->code.cells[vm->code.depth++];
 	c->op = op;
 	c->item.type = 0;
@@ -877,7 +859,7 @@ static int peek(char *source, char *name) {
 }
 
 static node_t* node_alloc(rela_vm* vm) {
-	return allot(vm, sizeof(node_t));
+	return region_alloc(&vm->prepare, sizeof(node_t));
 }
 
 static int parse_block(rela_vm* vm, char *source, node_t *node) {
@@ -1093,6 +1075,8 @@ static int parse_node(rela_vm* vm, char *source) {
 			if (peek(&source[offset], "function")) {
 				offset += 8;
 				node->type = NODE_FUNCTION;
+
+				ensure(vm, vm->fpath.depth < sizeof(vm->fpath.ids)/sizeof(vm->fpath.ids[0]), "reached function nest limit(%ld)", sizeof(vm->fpath.ids)/sizeof(vm->fpath.ids[0]));
 
 				memmove(node->fpath.ids, vm->fpath.ids, vm->fpath.depth*sizeof(int));
 				node->fpath.depth = vm->fpath.depth;
@@ -1330,7 +1314,6 @@ static int parse_node(rela_vm* vm, char *source) {
 			prev->field = true;
 			continue;
 		}
-
 		break;
 	}
 
@@ -1451,9 +1434,6 @@ static int parse(rela_vm* vm, char *source, int results, int mode) {
 	push(vm, (item_t){.type = NODE, .node = node});
 	return offset;
 }
-
-typedef struct {
-} compilation_t;
 
 static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	int flag_assign = flags & PROCESS_ASSIGN ? 1:0;
@@ -1915,17 +1895,11 @@ static void arrive(rela_vm* vm, int ip) {
 static void depart(rela_vm* vm) {
 	cor_t* cor = routine(vm);
 
-	for (int i = vec_size(vm, &cor->locals), l = vec_cell(vm, &cor->calls, -FRAME+LOCALS)->inum; i > l; --i) vec_pop(vm, &cor->locals);
-	for (int i = vec_size(vm, &cor->paths),  l = vec_cell(vm, &cor->calls, -FRAME+PATHS)->inum; i > l; --i) vec_pop(vm, &cor->paths);
-	for (int i = vec_size(vm, &cor->loops),  l = vec_cell(vm, &cor->calls, -FRAME+LOOPS)->inum; i > l; --i) vec_pop(vm, &cor->loops);
-	for (int i = vec_size(vm, &cor->marks),  l = vec_cell(vm, &cor->calls, -FRAME+MARKS)->inum; i > l; --i) vec_pop(vm, &cor->marks);
-
 	cor->ip = vec_pop(vm, &cor->calls).inum;
-
-	vec_pop(vm, &cor->calls);
-	vec_pop(vm, &cor->calls);
-	vec_pop(vm, &cor->calls);
-	vec_pop(vm, &cor->calls);
+	for (int i = vec_size(vm, &cor->marks),  l = vec_pop(vm, &cor->calls).inum; i > l; --i) vec_pop(vm, &cor->marks);
+	for (int i = vec_size(vm, &cor->loops),  l = vec_pop(vm, &cor->calls).inum; i > l; --i) vec_pop(vm, &cor->loops);
+	for (int i = vec_size(vm, &cor->paths),  l = vec_pop(vm, &cor->calls).inum; i > l; --i) vec_pop(vm, &cor->paths);
+	for (int i = vec_size(vm, &cor->locals), l = vec_pop(vm, &cor->calls).inum; i > l; --i) vec_pop(vm, &cor->locals);
 }
 
 static void op_coroutine(rela_vm* vm) {
@@ -2592,8 +2566,7 @@ func_t funcs[OPERATIONS] = {
 static void decompile(rela_vm* vm, code_t* c) {
 	char tmp[100];
 	char *str = tmptext(vm, c->item, tmp, sizeof(tmp));
-	fprintf(stderr, "%04ld  %-10s  %s\n",
-		c - vm->code.cells, funcs[c->op].name, str);
+	fprintf(stderr, "%04ld  %-10s  %s\n", c - vm->code.cells, funcs[c->op].name, str);
 	fflush(stderr);
 }
 
@@ -2635,10 +2608,12 @@ static void destroy(rela_vm* vm) {
 		return;
 	}
 
-	vm->allocations.start = 0;
+	vm->general.start = 0;
 	reset(vm);
 	free(vm->code.cells);
-	free(vm->allocations.cells);
+	free(vm->general.cells);
+	free(vm->prepare.cells);
+	free(vm->strings.cells);
 	free(vm);
 }
 
@@ -2686,8 +2661,9 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	op_unmark(vm);
 	vec_pop(vm, &vm->routines);
 
-	vm->allocations.start = vm->allocations.depth;
+	vm->general.start = vm->general.depth;
 	vm->strings.start = vm->strings.depth;
+	region_truncate(&vm->prepare);
 	return vm;
 }
 
