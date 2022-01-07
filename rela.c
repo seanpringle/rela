@@ -45,7 +45,7 @@ enum opcode_t {
 	OP_JFALSE, OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT,
 	OP_ASSIGN, OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
 	OP_NOT, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SLURP, OP_SORT, OP_ASSERT,
-	OP_LGET, OP_LSET,
+	OP_LGET, OP_LSET, OP_PID,
 	OPERATIONS
 };
 
@@ -115,6 +115,7 @@ typedef struct _cor_t {
 	vec_t calls;  // threading call/return, stack frames
 	vec_t loops;  // loop states
 	vec_t marks;  // mark/limits of stack data
+	vec_t paths;  // compile-time scope path
 	int ip;
 	int state;
 } cor_t;
@@ -136,6 +137,11 @@ typedef struct _node_t {
 	vec_t keys;
 	vec_t vals;
 	int results;
+	struct {
+		int id;
+		int ids[32];
+		int depth;
+	} fpath;
 } node_t;
 
 typedef struct {
@@ -222,7 +228,11 @@ typedef struct _rela_vm {
 		int start;
 	} strings;
 
-	vec_t scope_cache;
+	struct {
+		int id;
+		int ids[32];
+		int depth;
+	} fpath;
 
 	jmp_buf jmp;
 	char err[100];
@@ -548,9 +558,6 @@ static char* strintern(rela_vm* vm, char* str) {
 
 static void reset(rela_vm* vm) {
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
-
-	vec_clear(vm, &vm->scope_cache);
-	vm->scope_cache.items = NULL;
 
 	for (int i = vm->allocations.start; i < vm->allocations.depth; i++) {
 		allocation_t* allocation = &vm->allocations.cells[i];
@@ -1087,6 +1094,12 @@ static int parse_node(rela_vm* vm, char *source) {
 				offset += 8;
 				node->type = NODE_FUNCTION;
 
+				memmove(node->fpath.ids, vm->fpath.ids, vm->fpath.depth*sizeof(int));
+				node->fpath.depth = vm->fpath.depth;
+				node->fpath.id = ++vm->fpath.id;
+				vm->fpath.ids[vm->fpath.depth] = node->fpath.id;
+				vm->fpath.depth++;
+
 				offset += skip_gap(&source[offset]);
 
 				// optional function name
@@ -1131,6 +1144,9 @@ static int parse_node(rela_vm* vm, char *source) {
 
 				// do block
 				offset += parse_block(vm, &source[offset], node);
+
+				assert(vm->fpath.depth > 0);
+				vm->fpath.depth--;
 			}
 			else
 			if (peek(&source[offset], "return")) {
@@ -1560,6 +1576,11 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		code_t *jump = compile(vm, OP_JMP);
 		entry->item = (item_t){.type = SUBROUTINE, .sub = vm->code.depth};
 
+		compile(vm, OP_PID)->item = integer(vm, node->fpath.id);
+		for (int i = 0, l = node->fpath.depth; i < l; i++) {
+			compile(vm, OP_PID)->item = integer(vm, node->fpath.ids[i]);
+		}
+
 		for (int i = 0; i < vec_size(vm, &node->keys); i++)
 			process(vm, vec_get(vm, &node->keys, i).node, PROCESS_ASSIGN, i);
 
@@ -1872,10 +1893,13 @@ static void op_unmap(rela_vm* vm) {
 	push(vm, (item_t){.type = MAP, .map = vec_pop(vm, &routine(vm)->maps).map});
 }
 
+#define FRAME 5
+
 static void arrive(rela_vm* vm, int ip) {
 	cor_t* cor = routine(vm);
 
 	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->locals)));
+	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->paths)));
 	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->loops)));
 	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->marks)));
 	vec_push(vm, &cor->calls, integer(vm, cor->ip));
@@ -1886,14 +1910,17 @@ static void arrive(rela_vm* vm, int ip) {
 static void depart(rela_vm* vm) {
 	cor_t* cor = routine(vm);
 
-	while (vec_size(vm, &cor->locals) > vec_cell(vm, &cor->calls, -4)->inum)
-		vec_pop(vm, &cor->locals);
+	for (int i = vec_size(vm, &cor->locals), l = vec_cell(vm, &cor->calls, -FRAME+0)->inum; i > l; --i) vec_pop(vm, &cor->locals);
+	for (int i = vec_size(vm, &cor->paths),  l = vec_cell(vm, &cor->calls, -FRAME+1)->inum; i > l; --i) vec_pop(vm, &cor->paths);
+	for (int i = vec_size(vm, &cor->loops),  l = vec_cell(vm, &cor->calls, -FRAME+2)->inum; i > l; --i) vec_pop(vm, &cor->loops);
+	for (int i = vec_size(vm, &cor->marks),  l = vec_cell(vm, &cor->calls, -FRAME+3)->inum; i > l; --i) vec_pop(vm, &cor->marks);
 
 	cor->ip = vec_pop(vm, &cor->calls).inum;
 
-	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->marks), "mark stack mismatch (return)");
-	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->loops), "loop stack mismatch (return)");
-	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->locals), "local stack mismatch (return)");
+	vec_pop(vm, &cor->calls);
+	vec_pop(vm, &cor->calls);
+	vec_pop(vm, &cor->calls);
+	vec_pop(vm, &cor->calls);
 }
 
 static void op_coroutine(rela_vm* vm) {
@@ -1969,19 +1996,14 @@ static void op_call(rela_vm* vm) {
 }
 
 // OP_CLEAN prepares the subroutine for OP_RETURN by resetting the call frame, and any returned results
-// need to stream onto a clean stack between OP_CLEAN and OP_RETURN. This is why marks, loops and stack
-// items are cleared by OP_CLEAN, but locals and ip are not touched until OP_RETURN.
+// need to stream onto a clean stack between OP_CLEAN and OP_RETURN.
 static void op_clean(rela_vm* vm) {
-	cor_t* cor = routine(vm);
-	while (vec_size(vm, &cor->marks) > vec_cell(vm, &cor->calls, -2)->inum)
-		vec_pop(vm, &cor->marks);
-	while (vec_size(vm, &cor->loops) > vec_cell(vm, &cor->calls, -3)->inum)
-		vec_pop(vm, &cor->loops);
 	while (depth(vm)) pop(vm);
 }
 
 static void op_return(rela_vm* vm) {
 	cor_t* cor = routine(vm);
+
 	depart(vm);
 
 	if (!cor->ip) {
@@ -2097,6 +2119,10 @@ static void op_vector(rela_vm* vm) {
 	push(vm, (item_t){.type = VECTOR, .vec = vec});
 }
 
+static void op_pid(rela_vm* vm) {
+	vec_push(vm, &routine(vm)->paths, literal(vm));
+}
+
 static void assign(rela_vm* vm, item_t key, item_t val) {
 	cor_t* cor = routine(vm);
 
@@ -2104,7 +2130,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
 
 	if (!map && vec_size(vm, &cor->calls)) {
-		for (int i = vec_cell(vm, &cor->calls, -4)->inum, l = vec_size(vm, &cor->locals); i < l; i+=2) {
+		for (int i = vec_cell(vm, &cor->calls, -FRAME)->inum, l = vec_size(vm, &cor->locals); i < l; i+=2) {
 			if (equal(vm, vec_get(vm, &cor->locals, i), key)) {
 				vec_cell(vm, &cor->locals, i+1)[0] = val;
 				return;
@@ -2122,11 +2148,39 @@ static bool find(rela_vm* vm, item_t key, item_t* val) {
 	cor_t* cor = routine(vm);
 
 	if (vec_size(vm, &cor->calls)) {
-		for (int i = vec_cell(vm, &cor->calls, -4)->inum, l = vec_size(vm, &cor->locals); i < l; i+=2) {
-			if (equal(vm, vec_get(vm, &cor->locals, i), key)) {
-				*val = vec_get(vm, &cor->locals, i+1);
-				return true;
+		assert(vec_size(vm, &cor->calls)%FRAME==0);
+
+		int frame_last = vec_size(vm, &cor->calls)-FRAME;
+		int frame = frame_last;
+
+		int pids_base = vec_cell(vm, &cor->calls, frame+1)->inum;
+		item_t* pids = vec_cell(vm, &cor->paths, pids_base);
+		int depth = vec_size(vm, &cor->paths) - pids_base;
+
+		while (frame >= 0) {
+			int paths_base = vec_cell(vm, &cor->calls, frame+1)->inum;
+			int pid = vec_cell(vm, &cor->paths, paths_base)->inum;
+
+			bool check = false;
+			for (int i = 0; !check && i < depth; i++) {
+				if (pid == pids[i].inum) check = true;
 			}
+
+			if (check) {
+				int local_base = vec_cell(vm, &cor->calls, frame)->inum;
+				int local_last = frame < frame_last ? vec_cell(vm, &cor->calls, frame+FRAME)->inum: vec_size(vm, &cor->locals);
+				int local = local_base;
+
+				while (local < local_last) {
+					if (equal(vm, vec_get(vm, &cor->locals, local), key)) {
+						*val = vec_get(vm, &cor->locals, local+1);
+						return true;
+					}
+					local += 2;
+				}
+			}
+
+			frame -= FRAME;
 		}
 	}
 
@@ -2516,6 +2570,7 @@ func_t funcs[OPERATIONS] = {
 	[OP_SORT] = { .name = "sort", .func = op_sort },
 	[OP_LGET] = { .name = "lget", .func = op_lget },
 	[OP_LSET] = { .name = "lset", .func = op_lset },
+	[OP_PID] = { .name = "pid", .func = op_pid },
 	[OP_ASSERT] = { .name = "assert", .func = op_assert },
 };
 
