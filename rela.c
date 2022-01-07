@@ -1894,6 +1894,11 @@ static void op_unmap(rela_vm* vm) {
 }
 
 #define FRAME 5
+#define LOCALS 0
+#define PATHS 1
+#define LOOPS 2
+#define MARKS 3
+#define IP 4
 
 static void arrive(rela_vm* vm, int ip) {
 	cor_t* cor = routine(vm);
@@ -1910,10 +1915,10 @@ static void arrive(rela_vm* vm, int ip) {
 static void depart(rela_vm* vm) {
 	cor_t* cor = routine(vm);
 
-	for (int i = vec_size(vm, &cor->locals), l = vec_cell(vm, &cor->calls, -FRAME+0)->inum; i > l; --i) vec_pop(vm, &cor->locals);
-	for (int i = vec_size(vm, &cor->paths),  l = vec_cell(vm, &cor->calls, -FRAME+1)->inum; i > l; --i) vec_pop(vm, &cor->paths);
-	for (int i = vec_size(vm, &cor->loops),  l = vec_cell(vm, &cor->calls, -FRAME+2)->inum; i > l; --i) vec_pop(vm, &cor->loops);
-	for (int i = vec_size(vm, &cor->marks),  l = vec_cell(vm, &cor->calls, -FRAME+3)->inum; i > l; --i) vec_pop(vm, &cor->marks);
+	for (int i = vec_size(vm, &cor->locals), l = vec_cell(vm, &cor->calls, -FRAME+LOCALS)->inum; i > l; --i) vec_pop(vm, &cor->locals);
+	for (int i = vec_size(vm, &cor->paths),  l = vec_cell(vm, &cor->calls, -FRAME+PATHS)->inum; i > l; --i) vec_pop(vm, &cor->paths);
+	for (int i = vec_size(vm, &cor->loops),  l = vec_cell(vm, &cor->calls, -FRAME+LOOPS)->inum; i > l; --i) vec_pop(vm, &cor->loops);
+	for (int i = vec_size(vm, &cor->marks),  l = vec_cell(vm, &cor->calls, -FRAME+MARKS)->inum; i > l; --i) vec_pop(vm, &cor->marks);
 
 	cor->ip = vec_pop(vm, &cor->calls).inum;
 
@@ -1995,8 +2000,6 @@ static void op_call(rela_vm* vm) {
 	arrive(vm, item.sub);
 }
 
-// OP_CLEAN prepares the subroutine for OP_RETURN by resetting the call frame, and any returned results
-// need to stream onto a clean stack between OP_CLEAN and OP_RETURN.
 static void op_clean(rela_vm* vm) {
 	while (depth(vm)) pop(vm);
 }
@@ -2051,14 +2054,14 @@ static void op_limit(rela_vm* vm) {
 
 static void op_break(rela_vm* vm) {
 	routine(vm)->ip = vec_cell(vm, &routine(vm)->loops, -1)->inum;
-	while (vec_size(vm, &routine(vm)->marks) > vec_cell(vm, &routine(vm)->loops, -2)->inum)
+	while (vec_size(vm, &routine(vm)->marks) > vec_cell(vm, &routine(vm)->loops, -FRAME+MARKS)->inum)
 		vec_pop(vm, &routine(vm)->marks);
 	while (depth(vm)) pop(vm);
 }
 
 static void op_continue(rela_vm* vm) {
 	routine(vm)->ip = vec_cell(vm, &routine(vm)->loops, -1)->inum-1;
-	while (vec_size(vm, &routine(vm)->marks) > vec_cell(vm, &routine(vm)->loops, -2)->inum)
+	while (vec_size(vm, &routine(vm)->marks) > vec_cell(vm, &routine(vm)->loops, -FRAME+MARKS)->inum)
 		vec_pop(vm, &routine(vm)->marks);
 	while (depth(vm)) pop(vm);
 }
@@ -2123,28 +2126,8 @@ static void op_pid(rela_vm* vm) {
 	vec_push(vm, &routine(vm)->paths, literal(vm));
 }
 
-static void assign(rela_vm* vm, item_t key, item_t val) {
-	cor_t* cor = routine(vm);
-
-	// OP_ASSIGN is used for too many things: local variables, map literal keys, global keys
-	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
-
-	if (!map && vec_size(vm, &cor->calls)) {
-		for (int i = vec_cell(vm, &cor->calls, -FRAME)->inum, l = vec_size(vm, &cor->locals); i < l; i+=2) {
-			if (equal(vm, vec_get(vm, &cor->locals, i), key)) {
-				vec_cell(vm, &cor->locals, i+1)[0] = val;
-				return;
-			}
-		}
-		vec_push(vm, &cor->locals, key);
-		vec_push(vm, &cor->locals, val);
-		return;
-	}
-
-	map_set(vm, map ? map: vm->scope_global, key, val);
-}
-
-static bool find(rela_vm* vm, item_t key, item_t* val) {
+// Locate a local variable cell by key somewhere on cor->locals
+static item_t* locate(rela_vm* vm, item_t key) {
 	cor_t* cor = routine(vm);
 
 	if (vec_size(vm, &cor->calls)) {
@@ -2153,12 +2136,12 @@ static bool find(rela_vm* vm, item_t key, item_t* val) {
 		int frame_last = vec_size(vm, &cor->calls)-FRAME;
 		int frame = frame_last;
 
-		int pids_base = vec_cell(vm, &cor->calls, frame+1)->inum;
+		int pids_base = vec_cell(vm, &cor->calls, frame+PATHS)->inum;
 		item_t* pids = vec_cell(vm, &cor->paths, pids_base);
 		int depth = vec_size(vm, &cor->paths) - pids_base;
 
 		while (frame >= 0) {
-			int paths_base = vec_cell(vm, &cor->calls, frame+1)->inum;
+			int paths_base = vec_cell(vm, &cor->calls, frame+PATHS)->inum;
 			int pid = vec_cell(vm, &cor->paths, paths_base)->inum;
 
 			bool check = false;
@@ -2166,6 +2149,8 @@ static bool find(rela_vm* vm, item_t key, item_t* val) {
 				if (pid == pids[i].inum) check = true;
 			}
 
+			// if this call stack frame belongs to a function outside the current
+			// function's compile-time scope chain, skip it
 			if (check) {
 				int local_base = vec_cell(vm, &cor->calls, frame)->inum;
 				int local_last = frame < frame_last ? vec_cell(vm, &cor->calls, frame+FRAME)->inum: vec_size(vm, &cor->locals);
@@ -2173,8 +2158,7 @@ static bool find(rela_vm* vm, item_t key, item_t* val) {
 
 				while (local < local_last) {
 					if (equal(vm, vec_get(vm, &cor->locals, local), key)) {
-						*val = vec_get(vm, &cor->locals, local+1);
-						return true;
+						return vec_cell(vm, &cor->locals, local+1);
 					}
 					local += 2;
 				}
@@ -2182,6 +2166,37 @@ static bool find(rela_vm* vm, item_t key, item_t* val) {
 
 			frame -= FRAME;
 		}
+	}
+	return NULL;
+}
+
+static void assign(rela_vm* vm, item_t key, item_t val) {
+	cor_t* cor = routine(vm);
+
+	// OP_ASSIGN is used for too many things: local variables, map literal keys, global keys
+	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
+
+	if (!map && vec_size(vm, &cor->calls)) {
+		item_t* local = locate(vm, key);
+		if (local) {
+			*local = val;
+		}
+		else {
+			vec_push(vm, &cor->locals, key);
+			vec_push(vm, &cor->locals, val);
+		}
+		return;
+	}
+
+	map_set(vm, map ? map: vm->scope_global, key, val);
+}
+
+static bool find(rela_vm* vm, item_t key, item_t* val) {
+	item_t* local = locate(vm, key);
+
+	if (local) {
+		*val = *local;
+		return true;
 	}
 
 	if (map_get(vm, vm->scope_global, key, val)) return true;
