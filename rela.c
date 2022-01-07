@@ -40,12 +40,12 @@
 #endif
 
 enum opcode_t {
-	OP_NOP=1, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_MAP,
-	OP_VECTOR, OP_UNMAP, OP_MARK, OP_MARKS, OP_LIMIT, OP_LOOP, OP_UNLOOP, OP_REPLY,
-	OP_BREAK, OP_CONTINUE, OP_JMP, OP_JFALSE, OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT,
-	OP_TRUE, OP_FALSE, OP_LIT, OP_ASSIGN, OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB,
-	OP_MUL, OP_DIV, OP_MOD, OP_NOT, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SLURP,
-	OP_SORT, OP_ASSERT, OP_LGET, OP_LSET,
+	OP_NOP=1, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_MAP, OP_VECTOR,
+	OP_UNMAP, OP_MARK, OP_MARKS, OP_LIMIT, OP_LOOP, OP_UNLOOP, OP_CLEAN, OP_BREAK, OP_CONTINUE, OP_JMP,
+	OP_JFALSE, OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT,
+	OP_ASSIGN, OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
+	OP_NOT, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SLURP, OP_SORT, OP_ASSERT,
+	OP_LGET, OP_LSET,
 	OPERATIONS
 };
 
@@ -368,6 +368,12 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 	return &vec->items[index];
 }
 
+static void vec_del(rela_vm* vm, vec_t* vec, int index) {
+	ensure(vm, index >= 0 && index < vec->count, "vec_del out of bounds");
+	memmove(&vec->items[index], &vec->items[index+1], (vec->count - index - 1) * sizeof(item_t));
+	vec->count--;
+}
+
 static void vec_push(rela_vm* vm, vec_t* vec, item_t item) {
 	vec_ins(vm, vec, vec->count)[0] = item;
 }
@@ -461,12 +467,31 @@ static item_t* map_ref(rela_vm* vm, map_t* map, item_t key) {
 	return (i < vec_size(vm, &map->keys) && equal(vm, vec_get(vm, &map->keys, i), key)) ? vec_cell(vm, &map->vals, i): NULL;
 }
 
-static item_t map_get(rela_vm* vm, map_t* map, item_t key) {
+static bool map_get(rela_vm* vm, map_t* map, item_t key, item_t* val) {
 	item_t* item = map_ref(vm, map, key);
-	return item ? *item: nil(vm);
+	if (item) {
+		assert(item->type != NIL);
+		*val = *item;
+		return true;
+	}
+	return false;
+}
+
+static void map_clr(rela_vm* vm, map_t* map, item_t key) {
+	char tmp[100];
+	int i = map_lower_bound(vm, map, key);
+	if (i < vec_size(vm, &map->keys) && equal(vm, vec_get(vm, &map->keys, i), key)) {
+		ensure(vm, !map->immutable, "attempt to remove immutable key: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+		vec_del(vm, &map->keys, i);
+		vec_del(vm, &map->vals, i);
+	}
 }
 
 static void map_set(rela_vm* vm, map_t* map, item_t key, item_t val) {
+	if (val.type == NIL) {
+		map_clr(vm, map, key);
+		return;
+	}
 	char tmp[100];
 	int i = map_lower_bound(vm, map, key);
 	if (i < vec_size(vm, &map->keys) && equal(vm, vec_get(vm, &map->keys, i), key)) {
@@ -758,8 +783,8 @@ static code_t* compile(rela_vm* vm, int op) {
 
 		// scope_core is immutable, so compile stuff inline
 		if (op == OP_FIND && last->op == OP_LIT && last->item.type == STRING) {
-			item_t val = map_get(vm, &vm->scope_core, last->item);
-			if (val.type != NIL) {
+			item_t val = nil(vm);
+			if (map_get(vm, &vm->scope_core, last->item, &val)) {
 				last->item = val;
 				op = OP_NOP;
 			}
@@ -1543,7 +1568,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// if an explicit return expression is used, these instructions
 		// will be dead code
-		compile(vm, OP_REPLY);
+		compile(vm, OP_CLEAN);
 		compile(vm, OP_RETURN);
 		jump->item = integer(vm, vm->code.depth);
 		// will sub dead code
@@ -1762,7 +1787,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	else
 	// return 0 or more values
 	if (node->type == NODE_RETURN) {
-		compile(vm, OP_REPLY);
+		compile(vm, OP_CLEAN);
 
 		if (node->args)
 			process(vm, node->args, 0, 0);
@@ -1847,7 +1872,7 @@ static void op_unmap(rela_vm* vm) {
 	push(vm, (item_t){.type = MAP, .map = vec_pop(vm, &routine(vm)->maps).map});
 }
 
-static void enter(rela_vm* vm, int ip) {
+static void arrive(rela_vm* vm, int ip) {
 	cor_t* cor = routine(vm);
 
 	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->locals)));
@@ -1858,6 +1883,19 @@ static void enter(rela_vm* vm, int ip) {
 	cor->ip = ip;
 }
 
+static void depart(rela_vm* vm) {
+	cor_t* cor = routine(vm);
+
+	while (vec_size(vm, &cor->locals) > vec_cell(vm, &cor->calls, -4)->inum)
+		vec_pop(vm, &cor->locals);
+
+	cor->ip = vec_pop(vm, &cor->calls).inum;
+
+	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->marks), "mark stack mismatch (return)");
+	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->loops), "loop stack mismatch (return)");
+	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->locals), "local stack mismatch (return)");
+}
+
 static void op_coroutine(rela_vm* vm) {
 	cor_t *cor = cor_alloc(vm);
 
@@ -1866,7 +1904,7 @@ static void op_coroutine(rela_vm* vm) {
 	cor->state = COR_RUNNING;
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 
-	enter(vm, ip);
+	arrive(vm, ip);
 
 	vec_pop(vm, &vm->routines);
 	cor->state = COR_SUSPENDED;
@@ -1927,13 +1965,13 @@ static void op_call(rela_vm* vm) {
 	char tmp[100];
 	ensure(vm, item.type == SUBROUTINE, "invalid function: %s (ip: %u)", tmptext(vm, item, tmp, sizeof(tmp)), routine(vm)->ip);
 
-	enter(vm, item.sub);
+	arrive(vm, item.sub);
 }
 
-// OP_REPLY prepares the coroutine for OP_RETURN, but any returned results need to stream
-// onto the stack between OP_REPLY and OP_RETURN. This is why marks, loops and the current
-// stack frame are cleared by OP_REPLAY, but locals and ip are not touched until OP_RETURN.
-static void op_reply(rela_vm* vm) {
+// OP_CLEAN prepares the subroutine for OP_RETURN by resetting the call frame, and any returned results
+// need to stream onto a clean stack between OP_CLEAN and OP_RETURN. This is why marks, loops and stack
+// items are cleared by OP_CLEAN, but locals and ip are not touched until OP_RETURN.
+static void op_clean(rela_vm* vm) {
 	cor_t* cor = routine(vm);
 	while (vec_size(vm, &cor->marks) > vec_cell(vm, &cor->calls, -2)->inum)
 		vec_pop(vm, &cor->marks);
@@ -1944,15 +1982,7 @@ static void op_reply(rela_vm* vm) {
 
 static void op_return(rela_vm* vm) {
 	cor_t* cor = routine(vm);
-
-	while (vec_size(vm, &cor->locals) > vec_cell(vm, &cor->calls, -4)->inum)
-		vec_pop(vm, &cor->locals);
-
-	cor->ip = vec_pop(vm, &cor->calls).inum;
-
-	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->marks), "mark stack mismatch (return)");
-	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->loops), "loop stack mismatch (return)");
-	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->locals), "local stack mismatch (return)");
+	depart(vm);
 
 	if (!cor->ip) {
 		cor->state = COR_DEAD;
@@ -2069,6 +2099,8 @@ static void op_vector(rela_vm* vm) {
 
 static void assign(rela_vm* vm, item_t key, item_t val) {
 	cor_t* cor = routine(vm);
+
+	// OP_ASSIGN is used for too many things: local variables, map literal keys, global keys
 	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
 
 	if (!map && vec_size(vm, &cor->calls)) {
@@ -2086,26 +2118,22 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	map_set(vm, map ? map: vm->scope_global, key, val);
 }
 
-static item_t find(rela_vm* vm, item_t key) {
+static bool find(rela_vm* vm, item_t key, item_t* val) {
 	cor_t* cor = routine(vm);
 
-	for (int i = vec_size(vm, &cor->calls) ? vec_cell(vm, &cor->calls, -4)->inum: 0, l = vec_size(vm, &cor->locals); i < l; i+=2) {
-		if (equal(vm, vec_get(vm, &cor->locals, i), key)) {
-			return vec_get(vm, &cor->locals, i+1);
+	if (vec_size(vm, &cor->calls)) {
+		for (int i = vec_cell(vm, &cor->calls, -4)->inum, l = vec_size(vm, &cor->locals); i < l; i+=2) {
+			if (equal(vm, vec_get(vm, &cor->locals, i), key)) {
+				*val = vec_get(vm, &cor->locals, i+1);
+				return true;
+			}
 		}
 	}
 
-	item_t val = nil(vm);
+	if (map_get(vm, vm->scope_global, key, val)) return true;
+	if (map_get(vm, &vm->scope_core, key, val)) return true;
 
-	if (val.type == NIL) {
-		val = map_get(vm, vm->scope_global, key);
-	}
-
-	if (val.type == NIL) {
-		val = map_get(vm, &vm->scope_core, key);
-	}
-
-	return val;
+	return false;
 }
 
 static void op_for(rela_vm* vm) {
@@ -2179,10 +2207,10 @@ static void op_assign(rela_vm* vm) {
 
 static void op_find(rela_vm* vm) {
 	item_t key = pop(vm);
-	item_t val = find(vm, key);
+	item_t val = nil(vm);
 
 	char tmp[100];
-	ensure(vm, val.type != NIL, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+	ensure(vm, find(vm, key, &val), "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 
 	push(vm, val);
 }
@@ -2227,7 +2255,9 @@ static void op_get(rela_vm* vm) {
 	}
 	else
 	if (src.type == MAP) {
-		push(vm, map_get(vm, src.map, key));
+		item_t val = nil(vm);
+		map_get(vm, src.map, key, &val);
+		push(vm, val);
 	}
 	else {
 		char tmpA[100];
@@ -2446,7 +2476,7 @@ func_t funcs[OPERATIONS] = {
 	[OP_LIMIT] = { .name = "limit", .func = op_limit },
 	[OP_LOOP] = { .name = "loop", .func = op_loop },
 	[OP_UNLOOP] = { .name = "unloop", .func = op_unloop },
-	[OP_REPLY] = { .name = "reply", .func = op_reply },
+	[OP_CLEAN] = { .name = "clean", .func = op_clean },
 	[OP_BREAK] = { .name = "break", .func = op_break },
 	[OP_CONTINUE] = { .name = "continue", .func = op_continue },
 	[OP_AND] = { .name = "and", .func = op_and },

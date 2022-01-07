@@ -1,0 +1,10 @@
+
+stuff = { a = 1, b = 2 }
+
+assert(stuff.a == 1)
+assert(stuff.b != nil)
+
+stuff.b = nil
+
+assert(stuff.b == nil)
+assert(#stuff == 1)
