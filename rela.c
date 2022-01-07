@@ -40,8 +40,8 @@
 #endif
 
 enum opcode_t {
-	OP_NOP=1, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_LOCAL, OP_SCOPE,
-	OP_SMUDGE, OP_LITSTACK, OP_UNSCOPE, OP_LITSCOPE, OP_MARK, OP_MARKS, OP_LIMIT, OP_LOOP, OP_UNLOOP, OP_REPLY,
+	OP_NOP=1, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_MAP,
+	OP_VECTOR, OP_UNMAP, OP_MARK, OP_MARKS, OP_LIMIT, OP_LOOP, OP_UNLOOP, OP_REPLY,
 	OP_BREAK, OP_CONTINUE, OP_JMP, OP_JFALSE, OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT,
 	OP_TRUE, OP_FALSE, OP_LIT, OP_ASSIGN, OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB,
 	OP_MUL, OP_DIV, OP_MOD, OP_NOT, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SLURP,
@@ -104,15 +104,14 @@ typedef struct _vec_t {
 typedef struct _map_t {
 	vec_t keys;
 	vec_t vals;
-	bool smudged; // temporarily hidden
 	bool immutable; // keys may only be written once
 } map_t;
 
 typedef struct _cor_t {
 	vec_t stack;  // arguments, results
 	vec_t other;  // temporary data
-	vec_t scopes; // runtime call scopes
-	vec_t locals;
+	vec_t maps;   // map literals during construction
+	vec_t locals; // local variables key/val pairs
 	vec_t calls;  // threading call/return, stack frames
 	vec_t loops;  // loop states
 	vec_t marks;  // mark/limits of stack data
@@ -146,7 +145,6 @@ typedef struct {
 
 keyword_t keywords[] = {
 	{ .name = "global", .opcode = OP_GLOBAL },
-	{ .name = "local", .opcode = OP_LOCAL },
 	{ .name = "true", .opcode = OP_TRUE },
 	{ .name = "false", .opcode = OP_FALSE },
 	{ .name = "nil", .opcode = OP_NIL },
@@ -481,11 +479,6 @@ static void map_set(rela_vm* vm, map_t* map, item_t key, item_t val) {
 	}
 }
 
-static void map_clear(rela_vm* vm, map_t* map) {
-	vec_clear(vm, &map->keys);
-	vec_clear(vm, &map->vals);
-}
-
 static char* strintern(rela_vm* vm, char* str) {
 	ensure(vm, str, "strintern() null string");
 
@@ -782,18 +775,6 @@ static code_t* compile(rela_vm* vm, int op) {
 
 static cor_t* routine(rela_vm* vm) {
 	return vec_top(vm, &vm->routines).cor;
-}
-
-static map_t* scope_writing(rela_vm* vm) {
-	return vec_size(vm, &routine(vm)->scopes) ? vec_top(vm, &routine(vm)->scopes).map: vm->scope_global;
-}
-
-static map_t* scope_reading(rela_vm* vm) {
-	for (int i = 0; i < vec_size(vm, &routine(vm)->scopes); i++) {
-		map_t *map = vec_get(vm, &routine(vm)->scopes, -i-1).map;
-		if (!map->smudged) return map;
-	}
-	return vm->scope_global;
 }
 
 static vec_t* stack(rela_vm* vm) {
@@ -1452,7 +1433,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		for (int i = 0; i < vec_size(vm, &node->vals); i++)
 			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
 
-		// OP_SET|OP_ASSIGN index values from the bottom of the current stack frame
+		// OP_SET|OP_ASSIGN index values from the start of the current stack frame
 		for (int i = 0; i < vec_size(vm, &node->keys); i++) {
 			node_t* subnode = vec_get(vm, &node->keys, i).node;
 			process(vm, subnode, PROCESS_ASSIGN, i);
@@ -1548,7 +1529,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		if (node->item.type) {
 			code_t* name = compile(vm, OP_LIT);
 			name->item = node->item;
-			compile(vm, OP_ASSIGN);
+			compile(vm, OP_ASSIGN)->item = integer(vm, 0);
 		}
 
 		code_t *jump = compile(vm, OP_JMP);
@@ -1796,15 +1777,14 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		if (node->args)
 			process(vm, node->args, 0, 0);
 
-		compile(vm, OP_LITSTACK);
+		compile(vm, OP_VECTOR);
 		compile(vm, OP_LIMIT)->item = integer(vm, 1);
 	}
 	else
 	// literal map { a = 1, b = 2, c = nil }
 	if (node->type == NODE_MAP) {
 		compile(vm, OP_MARK);
-		compile(vm, OP_SCOPE);
-		compile(vm, OP_SMUDGE);
+		compile(vm, OP_MAP);
 
 		if (node->args)
 			process(vm, node->args, 0, 0);
@@ -1812,7 +1792,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		for (int i = 0; i < vec_size(vm, &node->vals); i++)
 			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
 
-		compile(vm, OP_LITSCOPE);
+		compile(vm, OP_UNMAP);
 		compile(vm, OP_LIMIT)->item = integer(vm, 1);
 	}
 	else {
@@ -1859,24 +1839,34 @@ static void op_print(rela_vm* vm) {
 	fflush(stdout);
 }
 
-static void op_scope(rela_vm* vm) {
-	map_t* map = vec_size(vm, &vm->scope_cache) ? vec_pop(vm, &vm->scope_cache).map: map_alloc(vm);
-	vec_push(vm, &routine(vm)->scopes, (item_t){.type = MAP, .map = map});
+static void op_map(rela_vm* vm) {
+	vec_push(vm, &routine(vm)->maps, (item_t){.type = MAP, .map = map_alloc(vm)});
 }
 
-static void op_unscope(rela_vm* vm) {
-	vec_push(vm, &vm->scope_cache, vec_pop(vm, &routine(vm)->scopes));
-	map_clear(vm, vec_top(vm, &vm->scope_cache).map);
+static void op_unmap(rela_vm* vm) {
+	push(vm, (item_t){.type = MAP, .map = vec_pop(vm, &routine(vm)->maps).map});
+}
+
+static void enter(rela_vm* vm, int ip) {
+	cor_t* cor = routine(vm);
+
+	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->locals)));
+	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->loops)));
+	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->marks)));
+	vec_push(vm, &cor->calls, integer(vm, cor->ip));
+
+	cor->ip = ip;
 }
 
 static void op_coroutine(rela_vm* vm) {
 	cor_t *cor = cor_alloc(vm);
-	cor->ip = pop_type(vm, SUBROUTINE).sub;
+
+	int ip = pop_type(vm, SUBROUTINE).sub;
 
 	cor->state = COR_RUNNING;
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 
-	op_scope(vm);
+	enter(vm, ip);
 
 	vec_pop(vm, &vm->routines);
 	cor->state = COR_SUSPENDED;
@@ -1926,10 +1916,6 @@ static void op_global(rela_vm* vm) {
 	push(vm, (item_t){.type = MAP, .map = vm->scope_global});
 }
 
-static void op_local(rela_vm* vm) {
-	push(vm, (item_t){.type = MAP, .map = scope_reading(vm)});
-}
-
 static void op_call(rela_vm* vm) {
 	item_t item = pop(vm);
 
@@ -1941,15 +1927,7 @@ static void op_call(rela_vm* vm) {
 	char tmp[100];
 	ensure(vm, item.type == SUBROUTINE, "invalid function: %s (ip: %u)", tmptext(vm, item, tmp, sizeof(tmp)), routine(vm)->ip);
 
-	op_scope(vm);
-	cor_t* cor = routine(vm);
-
-	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->locals)));
-	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->loops)));
-	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->marks)));
-	vec_push(vm, &cor->calls, integer(vm, cor->ip));
-
-	cor->ip = item.sub;
+	enter(vm, item.sub);
 }
 
 // OP_REPLY prepares the coroutine for OP_RETURN, but any returned results need to stream
@@ -1965,21 +1943,22 @@ static void op_reply(rela_vm* vm) {
 }
 
 static void op_return(rela_vm* vm) {
-	op_unscope(vm);
 	cor_t* cor = routine(vm);
 
-	if (vec_size(vm, &cor->calls) == 0) {
-		cor->state = COR_DEAD;
-		op_yield(vm);
-		return;
-	}
+	while (vec_size(vm, &cor->locals) > vec_cell(vm, &cor->calls, -4)->inum)
+		vec_pop(vm, &cor->locals);
 
 	cor->ip = vec_pop(vm, &cor->calls).inum;
 
 	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->marks), "mark stack mismatch (return)");
 	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->loops), "loop stack mismatch (return)");
+	ensure(vm, vec_pop(vm, &cor->calls).inum == vec_size(vm, &cor->locals), "local stack mismatch (return)");
 
-	for (int i = 0, l = vec_pop(vm, &cor->calls).inum; i < l; i++) vec_pop(vm, &cor->locals);
+	if (!cor->ip) {
+		cor->state = COR_DEAD;
+		op_yield(vm);
+		return;
+	}
 }
 
 static void op_drop(rela_vm* vm) {
@@ -1988,30 +1967,6 @@ static void op_drop(rela_vm* vm) {
 
 static void op_lit(rela_vm* vm) {
 	push(vm, literal(vm));
-}
-
-static void op_smudge(rela_vm* vm) {
-	scope_writing(vm)->smudged = true;
-}
-
-static void op_litstack(rela_vm* vm) {
-	int items = depth(vm);
-
-	vec_t* vec = vec_alloc(vm);
-
-	for (int i = 0; i < items; i++)
-		vec_push(vm, vec, vec_get(vm, stack(vm), vec_size(vm, stack(vm)) - items + i));
-
-	for (int i = 0; i < items; i++)
-		vec_pop(vm, stack(vm));
-
-	push(vm, (item_t){.type = VECTOR, .vec = vec});
-}
-
-static void op_litscope(rela_vm* vm) {
-	map_t *map = vec_pop(vm, &routine(vm)->scopes).map;
-	map->smudged = false;
-	push(vm, (item_t){.type = MAP, .map = map});
 }
 
 static void op_loop(rela_vm* vm) {
@@ -2098,6 +2053,61 @@ static void op_or(rela_vm* vm) {
 	else pop(vm);
 }
 
+static void op_vector(rela_vm* vm) {
+	int items = depth(vm);
+
+	vec_t* vec = vec_alloc(vm);
+
+	for (int i = 0; i < items; i++)
+		vec_push(vm, vec, vec_get(vm, stack(vm), vec_size(vm, stack(vm)) - items + i));
+
+	for (int i = 0; i < items; i++)
+		vec_pop(vm, stack(vm));
+
+	push(vm, (item_t){.type = VECTOR, .vec = vec});
+}
+
+static void assign(rela_vm* vm, item_t key, item_t val) {
+	cor_t* cor = routine(vm);
+	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
+
+	if (!map && vec_size(vm, &cor->calls)) {
+		for (int i = vec_cell(vm, &cor->calls, -4)->inum, l = vec_size(vm, &cor->locals); i < l; i+=2) {
+			if (equal(vm, vec_get(vm, &cor->locals, i), key)) {
+				vec_cell(vm, &cor->locals, i+1)[0] = val;
+				return;
+			}
+		}
+		vec_push(vm, &cor->locals, key);
+		vec_push(vm, &cor->locals, val);
+		return;
+	}
+
+	map_set(vm, map ? map: vm->scope_global, key, val);
+}
+
+static item_t find(rela_vm* vm, item_t key) {
+	cor_t* cor = routine(vm);
+
+	for (int i = vec_size(vm, &cor->calls) ? vec_cell(vm, &cor->calls, -4)->inum: 0, l = vec_size(vm, &cor->locals); i < l; i+=2) {
+		if (equal(vm, vec_get(vm, &cor->locals, i), key)) {
+			return vec_get(vm, &cor->locals, i+1);
+		}
+	}
+
+	item_t val = nil(vm);
+
+	if (val.type == NIL) {
+		val = map_get(vm, vm->scope_global, key);
+	}
+
+	if (val.type == NIL) {
+		val = map_get(vm, &vm->scope_core, key);
+	}
+
+	return val;
+}
+
 static void op_for(rela_vm* vm) {
 	assert(literal(vm).type == VECTOR);
 
@@ -2116,9 +2126,9 @@ static void op_for(rela_vm* vm) {
 		}
 		else {
 			if (vec_size(vm, vars) > 2)
-				map_set(vm, scope_writing(vm), vec_get(vm, vars, var++), integer(vm, step));
+				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 
-			map_set(vm, scope_writing(vm), vec_get(vm, vars, var++), integer(vm,step));
+			assign(vm, vec_get(vm, vars, var++), integer(vm,step));
 			push(vm, integer(vm, ++step));
 		}
 	}
@@ -2131,9 +2141,9 @@ static void op_for(rela_vm* vm) {
 		}
 		else {
 			if (vec_size(vm, vars) > 2)
-				map_set(vm, scope_writing(vm), vec_get(vm, vars, var++), integer(vm, step));
+				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 
-			map_set(vm, scope_writing(vm), vec_get(vm, vars, var++), vec_get(vm, iter.vec, step));
+			assign(vm, vec_get(vm, vars, var++), vec_get(vm, iter.vec, step));
 			push(vm, integer(vm, ++step));
 		}
 	}
@@ -2146,9 +2156,9 @@ static void op_for(rela_vm* vm) {
 		}
 		else {
 			if (vec_size(vm, vars) > 2)
-				map_set(vm, scope_writing(vm), vec_get(vm, vars, var++), vec_get(vm, &iter.map->keys, step));
+				assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->keys, step));
 
-			map_set(vm, scope_writing(vm), vec_get(vm, vars, var++), vec_get(vm, &iter.map->vals, step));
+			assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->vals, step));
 			push(vm, integer(vm, ++step));
 		}
 	}
@@ -2159,36 +2169,17 @@ static void op_for(rela_vm* vm) {
 
 static void op_assign(rela_vm* vm) {
 	item_t key = pop(vm);
+
 	int index = literal_int(vm);
+	// indexed from the base of the current marked frame
 	item_t val = index < depth(vm) ? *item(vm, -depth(vm)+index): nil(vm);
-	map_set(vm, scope_writing(vm), key, val);
+
+	assign(vm, key, val);
 }
 
 static void op_find(rela_vm* vm) {
 	item_t key = pop(vm);
-	vec_t* scopes = &routine(vm)->scopes;
-
-	// this is less than ideal, but should be fixed with the stack locals plan
-	for (int i = 0, l = vec_size(vm, scopes); i < l; i++) {
-		map_t *scope = vec_get(vm, scopes, -i-1).map;
-		if (scope->smudged) continue;
-
-		item_t val = map_get(vm, scope, key);
-		if (val.type == NIL) continue;
-
-		push(vm, val);
-		return;
-	}
-
-	item_t val = nil(vm);
-
-	if (val.type == NIL) {
-		val = map_get(vm, vm->scope_global, key);
-	}
-
-	if (val.type == NIL) {
-		val = map_get(vm, &vm->scope_core, key);
-	}
+	item_t val = find(vm, key);
 
 	char tmp[100];
 	ensure(vm, val.type != NIL, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
@@ -2448,12 +2439,9 @@ func_t funcs[OPERATIONS] = {
 	[OP_CALL] = { .name = "call", .func = op_call },
 	[OP_RETURN] = { .name = "return", .func = op_return },
 	[OP_GLOBAL] = { .name = "global", .func = op_global },
-	[OP_LOCAL] = { .name = "local", .func = op_local },
-	[OP_LITSTACK] = { .name = "litstack", .func = op_litstack },
-	[OP_SCOPE] = { .name = "scope", .func = op_scope },
-	[OP_SMUDGE] = { .name = "smudge", .func = op_smudge },
-	[OP_UNSCOPE] = { .name = "unscope", .func = op_unscope },
-	[OP_LITSCOPE] = { .name = "litscope", .func = op_litscope },
+	[OP_VECTOR] = { .name = "vector", .func = op_vector },
+	[OP_MAP] = { .name = "scope", .func = op_map },
+	[OP_UNMAP] = { .name = "unmap", .func = op_unmap },
 	[OP_MARK] = { .name = "mark", .func = op_mark },
 	[OP_LIMIT] = { .name = "limit", .func = op_limit },
 	[OP_LOOP] = { .name = "loop", .func = op_loop },
@@ -2514,8 +2502,8 @@ static int run(rela_vm* vm) {
 	if (wtf) {
 		char tmp[100];
 		fprintf(stderr, "%s (", vm->err);
-		fprintf(stderr, "ip %d ", routine(vm)->ip);
-		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
+		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? routine(vm)->ip: -1);
+		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
 		fprintf(stderr, ")\n");
 		reset(vm);
 		return wtf;

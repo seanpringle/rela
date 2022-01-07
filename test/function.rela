@@ -13,13 +13,13 @@ function outer()
 	function inner()
 		return 1
 	end
-	function inner2()
-		return inner()+1
-	end
+//	function inner2()
+//		return inner()+1
+//	end
 	assert(inner)
-	assert(local.inner == inner)
+//	assert(local.inner == inner)
 	assert(inner() == 1)
-	assert(inner2() == 2)
+//	assert(inner2() == 2)
 end
 
 assert(global.inner == nil)
