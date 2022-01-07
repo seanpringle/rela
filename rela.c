@@ -74,6 +74,9 @@ enum {
 	NODE_BUILTIN, NODE_VEC, NODE_MAP, NODE_FOR
 };
 
+#define STRTMP 100  // scratch space buffers
+#define STRBUF 1000 // strf, strcopy, strliteral
+
 struct _vec_t;
 struct _map_t;
 struct _cor_t;
@@ -86,7 +89,7 @@ typedef struct {
 		int sub;
 		int64_t inum;
 		double fnum;
-		char* str;
+		const char* str;
 		struct _vec_t* vec;
 		struct _map_t* map;
 		struct _cor_t* cor;
@@ -236,7 +239,7 @@ typedef struct _rela_vm {
 	} fpath;
 
 	jmp_buf jmp;
-	char err[100];
+	char err[STRTMP];
 } rela_vm;
 
 typedef void (*opcb)(rela_vm*);
@@ -250,13 +253,13 @@ typedef struct {
 static item_t nil(rela_vm* vm);
 static bool equal(rela_vm* vm, item_t a, item_t b);
 static bool less(rela_vm* vm, item_t a, item_t b);
-static char* tmptext(rela_vm* vm, item_t item, char* tmp, int size);
+static const char* tmptext(rela_vm* vm, item_t item, char* tmp, int size);
 static cor_t* routine(rela_vm* vm);
-static int parse(rela_vm* vm, char *source, int results, int mode);
-static int parse_block(rela_vm* vm, char *source, node_t *node);
-static int parse_branch(rela_vm* vm, char *source, node_t *node);
-static int parse_arglist(rela_vm* vm, char *source);
-static int parse_node(rela_vm* vm, char *source);
+static int parse(rela_vm* vm, const char *source, int results, int mode);
+static int parse_block(rela_vm* vm, const char *source, node_t *node);
+static int parse_branch(rela_vm* vm, const char *source, node_t *node);
+static int parse_arglist(rela_vm* vm, const char *source);
+static int parse_node(rela_vm* vm, const char *source);
 
 #define ensure(vm,c,...) if (!(c)) { snprintf(vm->err, sizeof(vm->err), __VA_ARGS__); longjmp(vm->jmp, 1); }
 
@@ -304,23 +307,6 @@ static void* region_realloc(region_t* region, void* ptr, size_t bytes) {
 	return ptr;
 }
 
-static void region_free(region_t* region, void* ptr) {
-	for (int i = (int)region->depth-1; i >= 0; --i) {
-		allocation_t* allocation = &region->cells[i];
-		if (allocation->ptr == ptr) {
-			free(ptr);
-			allocation->ptr = NULL;
-			allocation->bytes = 0;
-			assert(region->bytes >= allocation->bytes);
-			region->bytes -= allocation->bytes;
-			// only shrink the region if discarding the last allot
-			while (region->depth > region->start && !region->cells[region->depth-1].ptr)
-				region->depth--;
-			return;
-		}
-	}
-}
-
 static void region_truncate(region_t* region) {
 	while (region->depth > region->start) {
 		allocation_t* allocation = &region->cells[--region->depth];
@@ -341,14 +327,6 @@ static void* reallot(rela_vm* vm, void* ptr, size_t bytes) {
 	ptr = region_realloc(&vm->general, ptr, bytes);
 	ensure(vm, vm->general.bytes <= vm->memory_limit, "out of memory");
 	return ptr;
-}
-
-static void discard(rela_vm* vm, void* ptr) {
-	// interned strings may already have multiple references
-	for (int i = (int)vm->strings.depth-1; i >= 0; --i) {
-		if (vm->strings.cells[i] == ptr) return;
-	}
-	region_free(&vm->general, ptr);
 }
 
 static vec_t* vec_alloc(rela_vm* vm) {
@@ -518,12 +496,9 @@ static void map_set(rela_vm* vm, map_t* map, item_t key, item_t val) {
 	}
 }
 
-static char* strintern(rela_vm* vm, char* str) {
-	ensure(vm, str, "strintern() null string");
-
+static int str_lower_bound(rela_vm* vm, const char* str) {
 	int size = vm->strings.depth;
 	int index = 0;
-
 	if (size) {
 		int lower = 0;
 		int upper = size-1;
@@ -535,74 +510,73 @@ static char* strintern(rela_vm* vm, char* str) {
 			if (c < 0) lower = i+1; else upper = i-1;
 			index = lower;
 		}
+	}
+	return index;
+}
+
+static const char* strintern(rela_vm* vm, const char* str) {
+	ensure(vm, str, "strintern() null string");
+
+	int size = vm->strings.depth;
+	int index = 0;
+
+	if (size) {
+		index = str_lower_bound(vm, str);
 
 		if (index < vm->strings.depth && vm->strings.cells[index] == str) {
 			return str;
 		}
 
 		if (index < vm->strings.depth && strcmp(vm->strings.cells[index], str) == 0) {
-			discard(vm, str);
 			return vm->strings.cells[index];
 		}
 	}
+
+	int len = strlen(str);
+	char* cpy = allot(vm, len+1);
+	memcpy(cpy, str, len);
+	cpy[len] = 0;
 
 	vm->strings.depth++;
 	vm->strings.cells = realloc(vm->strings.cells, vm->strings.depth * sizeof(char*));
 	assert(index >= 0 && index < vm->strings.depth);
 
 	if (index == vm->strings.depth-1) {
-		vm->strings.cells[index] = str;
-		return str;
+		vm->strings.cells[index] = cpy;
+		return cpy;
 	}
 
 	memmove(&vm->strings.cells[index+1], &vm->strings.cells[index], (vm->strings.depth - index - 1) * sizeof(char*));
 
-	vm->strings.cells[index] = str;
-	return str;
+	vm->strings.cells[index] = cpy;
+	return cpy;
 }
 
-static void reset(rela_vm* vm) {
-	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
-	region_truncate(&vm->general);
-	vm->scope_global = NULL;
+static const char* strcopy(rela_vm* vm, const char* str) {
+	return strintern(vm, str);
 }
 
-static char* strcopy(rela_vm* vm, const char* str) {
-	char* cpy = allot(vm, strlen(str)+1);
-	strcpy(cpy, str);
-	return strintern(vm, cpy);
-}
-
-static char* strf(rela_vm *vm, char *pattern, ...) {
-	char *result = NULL;
+static const char* strf(rela_vm *vm, const char *pattern, ...) {
 	va_list args;
-	char buffer[8];
-
+	char buf[STRBUF];
 	va_start(args, pattern);
-	int len = vsnprintf(buffer, sizeof(buffer), pattern, args);
+	int len = vsnprintf(buf, STRBUF, pattern, args);
 	va_end(args);
-
-	assert(len > -1);
-	result = allot(vm, len+1);
-	assert(result);
-
-	va_start(args, pattern);
-	vsnprintf(result, len+1, pattern, args);
-	va_end(args);
-
-	return strintern(vm,result);
+	ensure(vm, len < sizeof(buf), "strf max length exceeded (%d bytes)", STRBUF-1);
+	return strintern(vm,buf);
 }
 
-static char* substr(rela_vm* vm, char *start, int offset, int length) {
-	char *buffer = allot(vm, length+1);
-	memcpy(buffer, start+offset, length);
-	buffer[length] = 0;
-	return strintern(vm,buffer);
+static const char* substr(rela_vm* vm, const char *start, int off, int len) {
+	char buf[STRBUF];
+	ensure(vm, len < STRBUF, "substr max len exceeded (%d bytes)", STRBUF-1);
+	memcpy(buf, start+off, len);
+	buf[len] = 0;
+	return strintern(vm,buf);
 }
 
-static char* strliteral(rela_vm* vm, char *str, char **err) {
-	char *res = allot(vm, strlen(str)+1);
-	char *rp = res, *sp = str;
+static const char* strliteral(rela_vm* vm, const char *str, char **err) {
+	char res[STRBUF];
+	char *rp = res, *sp = (char*)str, *ep = res + STRBUF;
 
 	sp++;
 
@@ -621,8 +595,11 @@ static char* strliteral(rela_vm* vm, char *str, char **err) {
 			else if (c == 'v') c = '\v';
 		}
 		*rp++ = c;
+		if (rp >= ep) rp = ep-1;
 	}
+
 	*rp = 0;
+	ensure(vm, rp <= ep, "strliteral max length exceeded (%d bytes)", STRBUF-1);
 
 	if (err)
 		*err = sp;
@@ -630,16 +607,22 @@ static char* strliteral(rela_vm* vm, char *str, char **err) {
 	return strintern(vm,res);
 }
 
-static int str_skip(char *source, strcb cb) {
+static int str_skip(const char *source, strcb cb) {
 	int offset = 0;
 	while (source[offset] && cb(source[offset])) offset++;
 	return offset;
 }
 
-static int str_scan(char *source, strcb cb) {
+static int str_scan(const char *source, strcb cb) {
 	int offset = 0;
 	while (source[offset] && !cb(source[offset])) offset++;
 	return offset;
+}
+
+static void reset(rela_vm* vm) {
+	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
+	region_truncate(&vm->general);
+	vm->scope_global = NULL;
 }
 
 static item_t nil(rela_vm* vm) {
@@ -650,8 +633,8 @@ static item_t integer(rela_vm* vm, int64_t i) {
 	return (item_t){.type = INTEGER, .inum = i};
 }
 
-static item_t string(rela_vm* vm, char* s) {
-	return (item_t){.type = STRING, .str = s};
+static item_t string(rela_vm* vm, const char* s) {
+	return (item_t){.type = STRING, .str = strintern(vm, s) };
 }
 
 static bool equal(rela_vm* vm, item_t a, item_t b) {
@@ -726,7 +709,7 @@ static item_t divide(rela_vm* vm, item_t a, item_t b) {
 	return nil(vm);
 }
 
-static char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
+static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	if (a.type == STRING) return a.str;
 
 	assert(a.type >= 0 && a.type < TYPES);
@@ -747,7 +730,8 @@ static char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	if (a.type == VECTOR) {
 		int len = snprintf(tmp, size, "[");
 		for (int i = 0, l = vec_size(vm, a.vec); len < size && i < l; i++) {
-			len += snprintf(tmp+len, size-len, "%s", tmptext(vm, vec_get(vm, a.vec, i), subtmpA, sizeof(subtmpA)));
+			len += snprintf(tmp+len, size-len, "%s",
+				tmptext(vm, vec_get(vm, a.vec, i), subtmpA, sizeof(subtmpA)));
 			if (i < l-1) len += snprintf(tmp+len, size-len, ", ");
 		}
 		len += snprintf(tmp+len, size-len, "]");
@@ -833,7 +817,7 @@ static int islf(int c) {
 	return c == '\n';
 }
 
-static int skip_gap(char *source) {
+static int skip_gap(const char *source) {
 	int offset = 0;
 
 	while (source[offset]) {
@@ -853,7 +837,7 @@ static int skip_gap(char *source) {
 	return offset;
 }
 
-static int peek(char *source, char *name) {
+static int peek(const char *source, char *name) {
 	int len = strlen(name);
 	return !strncmp(source, name, len) && !isname(source[len]);
 }
@@ -862,7 +846,7 @@ static node_t* node_alloc(rela_vm* vm) {
 	return region_alloc(&vm->prepare, sizeof(node_t));
 }
 
-static int parse_block(rela_vm* vm, char *source, node_t *node) {
+static int parse_block(rela_vm* vm, const char *source, node_t *node) {
 	int length = 0;
 	int found_end = 0;
 	int offset = skip_gap(source);
@@ -886,7 +870,7 @@ static int parse_block(rela_vm* vm, char *source, node_t *node) {
 	return offset;
 }
 
-static int parse_branch(rela_vm* vm, char *source, node_t *node) {
+static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 	int length = 0;
 	int found_else = 0;
 	int found_end = 0;
@@ -943,7 +927,7 @@ static int parse_branch(rela_vm* vm, char *source, node_t *node) {
 	return offset;
 }
 
-static int parse_arglist(rela_vm* vm, char *source) {
+static int parse_arglist(rela_vm* vm, const char *source) {
 	int mark = depth(vm);
 	int offset = skip_gap(source);
 
@@ -971,7 +955,7 @@ static int parse_arglist(rela_vm* vm, char *source) {
 
 // Since anything can return values, including some control structures, there is no
 // real difference between statements and expressions. Just nodes in the parse tree.
-static int parse_node(rela_vm* vm, char *source) {
+static int parse_node(rela_vm* vm, const char *source) {
 	int length = 0;
 	int offset = skip_gap(source);
 
@@ -1201,8 +1185,8 @@ static int parse_node(rela_vm* vm, char *source) {
 	if (source[offset] == '[' && source[offset+1] == '[') {
 		node->type = NODE_LITERAL;
 
-		char *start = &source[offset+2];
-		char *end = start;
+		const char *start = &source[offset+2];
+		const char *end = start;
 
 		while (*end && !(end[0] == ']' && end[1] == ']'))
 			end = strchr(end, ']');
@@ -1321,7 +1305,7 @@ static int parse_node(rela_vm* vm, char *source) {
 	return offset;
 }
 
-static int parse(rela_vm* vm, char *source, int results, int mode) {
+static int parse(rela_vm* vm, const char *source, int results, int mode) {
 	int length = 0;
 	int offset = skip_gap(source);
 
@@ -1619,15 +1603,15 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		if (dollar && dollar < node->item.str + strlen(node->item.str) - 1) {
 			assert(node->item.type == STRING);
 
-			char *str = node->item.str;
-			char *left = str;
-			char *right = str;
+			const char *str = node->item.str;
+			const char *left = str;
+			const char *right = str;
 
 			bool started = false;
 
 			while ((right = strchr(left, '$')) && right && *right) {
-				char *start = right+1;
-				char *finish = start;
+				const char *start = right+1;
+				const char *finish = start;
 				int length = 0;
 
 				if (*start == '(') {
@@ -1651,7 +1635,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 				left = finish;
 
 				if (length) {
-					char *sub = substr(vm, start, 0, length);
+					const char *sub = substr(vm, start, 0, length);
 					ensure(vm, length == parse(vm, sub, RESULTS_FIRST, PARSE_GREEDY), "string interpolation parsing failed");
 					process(vm, pop(vm).node, 0, 0);
 					if (started) compile(vm, OP_CONCAT);
@@ -1826,11 +1810,11 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	}
 }
 
-static void source (rela_vm* vm, char *s) {
-	int offset = skip_gap(s);
+static void source (rela_vm* vm, const char *source) {
+	int offset = skip_gap(source);
 
-	while (s[offset])
-		offset += parse(vm, &s[offset], RESULTS_DISCARD, PARSE_GREEDY);
+	while (source[offset])
+		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
 
 	for (int i = 0, l = depth(vm); i < l; i++)
 		process(vm, item(vm, i)->node, 0, 0);
@@ -1856,9 +1840,9 @@ static void op_print(rela_vm* vm) {
 
 	item_t* item = vec_cell(vm, stack(vm), -items);
 
-	char tmp[100];
+	char tmp[STRTMP];
 	for (int i = 0; i < items; i++) {
-		char *str = tmptext(vm, *item++, tmp, sizeof(tmp));
+		const char *str = tmptext(vm, *item++, tmp, sizeof(tmp));
 		fprintf(stdout, "%s%s", i ? "\t": "", str);
 	}
 	fprintf(stdout, "\n");
@@ -1968,7 +1952,7 @@ static void op_call(rela_vm* vm) {
 		return;
 	}
 
-	char tmp[100];
+	char tmp[STRTMP];
 	ensure(vm, item.type == SUBROUTINE, "invalid function: %s (ip: %u)", tmptext(vm, item, tmp, sizeof(tmp)), routine(vm)->ip);
 
 	arrive(vm, item.sub);
@@ -2252,7 +2236,7 @@ static void op_find(rela_vm* vm) {
 	item_t key = pop(vm);
 	item_t val = nil(vm);
 
-	char tmp[100];
+	char tmp[STRTMP];
 	ensure(vm, find(vm, key, &val), "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 
 	push(vm, val);
@@ -2283,8 +2267,8 @@ static void op_set(rela_vm* vm) {
 		map_set(vm, dst.map, key, val);
 	}
 	else {
-		char tmpA[100];
-		char tmpB[100];
+		char tmpA[STRTMP];
+		char tmpB[STRTMP];
 		ensure(vm, 0, "cannot set %s in item %s", tmptext(vm, key, tmpA, sizeof(tmpA)), tmptext(vm, key, tmpB, sizeof(tmpB)));
 	}
 }
@@ -2303,8 +2287,8 @@ static void op_get(rela_vm* vm) {
 		push(vm, val);
 	}
 	else {
-		char tmpA[100];
-		char tmpB[100];
+		char tmpA[STRTMP];
+		char tmpB[STRTMP];
 		ensure(vm, 0, "cannot get %s from item %s", tmptext(vm, key, tmpA, sizeof(tmpA)), tmptext(vm, key, tmpB, sizeof(tmpB)));
 	}
 }
@@ -2324,7 +2308,7 @@ static void op_neg(rela_vm* vm) {
 		vec_cell(vm, stack(vm), -1)->fnum *= -1;
 	}
 	else {
-		char tmp[100];
+		char tmp[STRTMP];
 		ensure(vm, 0, "cannot negate %s", tmptext(vm, top(vm), tmp, sizeof(tmp)));
 	}
 }
@@ -2395,13 +2379,28 @@ static void op_concat(rela_vm* vm) {
 	item_t b = pop(vm);
 	item_t a = pop(vm);
 
-	char tmpA[100];
-	char tmpB[100];
+	char tmpA[STRTMP];
+	char tmpB[STRTMP];
 
-	char *bs = tmptext(vm, b, tmpA, sizeof(tmpA));
-	char *as = tmptext(vm, a, tmpB, sizeof(tmpB));
+	const char *as = tmptext(vm, a, tmpA, sizeof(tmpA));
+	const char *bs = tmptext(vm, b, tmpB, sizeof(tmpB));
 
-	push(vm, string(vm, strf(vm, "%s%s", as, bs)));
+	char buf[STRBUF];
+
+	int lenA = strlen(as);
+	int lenB = strlen(bs);
+
+	ensure(vm, lenA+lenB < STRBUF, "op_concat max length exceeded (%d bytes)", STRBUF-1);
+
+	char* ap = buf+0;
+	char* bp = buf+lenA;
+
+	memcpy(ap, as, lenA);
+	memcpy(bp, bs, lenB);
+
+	buf[lenA+lenB] = 0;
+
+	push(vm, string(vm, buf));
 }
 
 static void op_count(rela_vm* vm) {
@@ -2416,7 +2415,7 @@ static void op_match(rela_vm* vm) {
 
 	const char *error;
 	int erroffset;
-	int ovector[100];
+	int ovector[STRTMP];
 	pcre_extra *extra = NULL;
 
 	pcre *re = pcre_compile(pattern.str, PCRE_DOTALL|PCRE_UTF8, &error, &erroffset, 0);
@@ -2441,7 +2440,7 @@ static void op_match(rela_vm* vm) {
 		matches = sizeof(ovector)/3;
 	}
 
-	char *buffer = allot(vm, strlen(subject.str)+1);
+	char buffer[strlen(subject.str)+1];
 
 	for (int i = 0; i < matches; i++) {
 		int offset = ovector[2*i];
@@ -2450,8 +2449,6 @@ static void op_match(rela_vm* vm) {
 		buffer[length] = 0;
 		push(vm, string(vm, strf(vm, "%s", buffer)));
 	}
-
-	discard(vm, buffer);
 
 	if (extra)
 		pcre_free_study(extra);
@@ -2486,7 +2483,7 @@ static void op_slurp(rela_vm* vm) {
 			ensure(vm, read == bytes, "fread failed");
 
 			pop(vm);
-			push(vm, string(vm, strintern(vm, ptr)));
+			push(vm, string(vm, ptr));
 		}
 		fclose(file);
 	}
@@ -2564,8 +2561,8 @@ func_t funcs[OPERATIONS] = {
 };
 
 static void decompile(rela_vm* vm, code_t* c) {
-	char tmp[100];
-	char *str = tmptext(vm, c->item, tmp, sizeof(tmp));
+	char tmp[STRTMP];
+	const char *str = tmptext(vm, c->item, tmp, sizeof(tmp));
 	fprintf(stderr, "%04ld  %-10s  %s\n", c - vm->code.cells, funcs[c->op].name, str);
 	fflush(stderr);
 }
@@ -2573,7 +2570,7 @@ static void decompile(rela_vm* vm, code_t* c) {
 static int run(rela_vm* vm) {
 	int wtf = setjmp(vm->jmp);
 	if (wtf) {
-		char tmp[100];
+		char tmp[STRTMP];
 		fprintf(stderr, "%s (", vm->err);
 		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? routine(vm)->ip: -1);
 		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
@@ -2592,7 +2589,7 @@ static int run(rela_vm* vm) {
 		if (ip < 0 || ip >= vm->code.depth) break;
 		funcs[vm->code.cells[ip].op].func(vm);
 
-//		char tmp[100];
+//		char tmp[STRTMP];
 //		fprintf(stderr, "ip %d ", ip);
 //		fprintf(stderr, "stack %s", tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)));
 //		fprintf(stderr, "\n");
@@ -2633,7 +2630,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 		return NULL;
 	}
 
-	map_set(vm, &vm->scope_core, string(vm, strintern(vm, "print")), (item_t){.type = SUBROUTINE, .sub = vm->code.depth});
+	map_set(vm, &vm->scope_core, string(vm, "print"), (item_t){.type = SUBROUTINE, .sub = vm->code.depth});
 	compile(vm, OP_PRINT);
 	compile(vm, OP_RETURN);
 
@@ -2650,7 +2647,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_alloc(vm)});
 	op_mark(vm);
 	routine(vm)->ip = vm->code.depth;
-	push(vm, string(vm, strintern(vm, (char*)src)));
+	push(vm, string(vm, (char*)src)); // shouldn't intern the src
 
 	op_slurp(vm);
 	ensure(vm, top(vm).type == STRING, "cannot read %s", src);
@@ -2760,28 +2757,28 @@ const char* rela_text(rela_vm* vm, rela_item opaque, char* tmp, size_t size) {
 }
 
 double rela_number(rela_vm* vm, rela_item opaque) {
-	char tmp[100];
+	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == FLOAT, "item is not a float: %s", tmptext(vm, item, tmp, sizeof(tmp)));
 	return item.fnum;
 }
 
 int64_t rela_integer(rela_vm* vm, rela_item opaque) {
-	char tmp[100];
+	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == INTEGER, "item is not an integer: %s", tmptext(vm, item, tmp, sizeof(tmp)));
 	return item.inum;
 }
 
 const char* rela_string(rela_vm* vm, rela_item opaque) {
-	char tmp[100];
+	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == STRING, "item is not a string: %s", tmptext(vm, item, tmp, sizeof(tmp)));
 	return item.str;
 }
 
 void* rela_data(rela_vm* vm, rela_item opaque) {
-	char tmp[100];
+	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == USERDATA, "item is not userdata: %s", tmptext(vm, item, tmp, sizeof(tmp)));
 	return item.data;
