@@ -774,7 +774,7 @@ static vec_t* stack(rela_vm* vm) {
 }
 
 static int depth(rela_vm* vm) {
-	int base = vec_cell(vm, &routine(vm)->marks, -1)->inum;
+	int base = vec_size(vm, &routine(vm)->marks) ? vec_cell(vm, &routine(vm)->marks, -1)->inum: 0;
 	return vec_size(vm, stack(vm)) - base;
 }
 
@@ -1421,6 +1421,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	// if we're assigning with chained expressions, only OP_SET|OP_ASSIGN the last one
 	bool assigning = flag_assign && !node->chain;
 
+	char tmp[STRTMP];
+
 	// a multi-part expression: a[,b...] = node[,node...]
 	// this is the entry point for most non-control non-opcode statements
 	if (node->type == NODE_MULTI) {
@@ -1544,6 +1546,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		for (int i = 0; i < vec_size(vm, &node->keys); i++)
 			process(vm, vec_get(vm, &node->keys, i).node, PROCESS_ASSIGN, i);
 
+		compile(vm, OP_CLEAN);
+
 		for (int i = 0; i < vec_size(vm, &node->vals); i++)
 			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
 
@@ -1656,6 +1660,14 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		if (node->chain) {
 			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
 		}
+
+		ensure(vm, !assigning || node->item.type == STRING, "cannot assign %s",
+			tmptext(vm, node->item, tmp, sizeof(tmp)));
+
+		// special case allows: "complex-string" = value in map literals
+		if (assigning && node->item.type == STRING) {
+			compile(vm, OP_ASSIGN)->item = integer(vm, index);
+		}
 	}
 	else
 	// a built-in function-like keyword with arguments
@@ -1669,6 +1681,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		compile(vm, node->opcode);
 		compile(vm, OP_LIMIT)->item = integer(vm, node->results);
+
+		ensure(vm, !assigning, "cannot assign to keyword");
 	}
 	else
 	// if expression ... [else ...] end
@@ -1704,6 +1718,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		else {
 			jump->item = integer(vm, vm->code.depth);
 		}
+
+		ensure(vm, !assigning, "cannot assign to if block");
 	}
 	else
 	// while expression ... end
@@ -1732,6 +1748,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		loop->item = integer(vm, vm->code.depth);
 		compile(vm, OP_UNLOOP);
 		compile(vm, OP_LIMIT);
+
+		ensure(vm, !assigning, "cannot assign to while block");
 	}
 	else
 	// for k,v in container ... end
@@ -1768,6 +1786,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_UNLOOP);
 		compile(vm, OP_LIMIT);
 		compile(vm, OP_LIMIT);
+
+		ensure(vm, !assigning, "cannot assign to for block");
 	}
 	else
 	// return 0 or more values
@@ -1778,6 +1798,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			process(vm, node->args, 0, 0);
 
 		compile(vm, OP_RETURN);
+
+		ensure(vm, !assigning, "cannot assign to return");
 	}
 	else
 	// literal vector [1,2,3]
@@ -1874,6 +1896,11 @@ static void arrive(rela_vm* vm, int ip) {
 	vec_push(vm, &cor->calls, integer(vm, cor->ip));
 
 	cor->ip = ip;
+
+	int maps = vec_size(vm, &cor->maps);
+	for (int i = 0, l = maps; i < l; i++)
+		vec_push(vm, &cor->other, vec_pop(vm, &cor->maps));
+	vec_push(vm, &cor->other, integer(vm, maps));
 }
 
 static void depart(rela_vm* vm) {
@@ -1884,6 +1911,10 @@ static void depart(rela_vm* vm) {
 	for (int i = vec_size(vm, &cor->loops),  l = vec_pop(vm, &cor->calls).inum; i > l; --i) vec_pop(vm, &cor->loops);
 	for (int i = vec_size(vm, &cor->paths),  l = vec_pop(vm, &cor->calls).inum; i > l; --i) vec_pop(vm, &cor->paths);
 	for (int i = vec_size(vm, &cor->locals), l = vec_pop(vm, &cor->calls).inum; i > l; --i) vec_pop(vm, &cor->locals);
+
+	int maps = vec_pop(vm, &cor->other).inum;
+	for (int i = 0, l = maps; i < l; i++)
+		vec_push(vm, &cor->maps, vec_pop(vm, &cor->other));
 }
 
 static void op_coroutine(rela_vm* vm) {
@@ -2085,7 +2116,7 @@ static void op_pid(rela_vm* vm) {
 }
 
 // Locate a local variable cell by key somewhere on cor->locals
-static item_t* locate(rela_vm* vm, item_t key) {
+static item_t* locate(rela_vm* vm, item_t key, int frames) {
 	cor_t* cor = routine(vm);
 
 	if (vec_size(vm, &cor->calls)) {
@@ -2098,7 +2129,7 @@ static item_t* locate(rela_vm* vm, item_t key) {
 		item_t* pids = vec_cell(vm, &cor->paths, pids_base);
 		int depth = vec_size(vm, &cor->paths) - pids_base;
 
-		while (frame >= 0) {
+		while (frames > 0 && frame >= 0) {
 			int paths_base = vec_cell(vm, &cor->calls, frame+PATHS)->inum;
 			int pid = vec_cell(vm, &cor->paths, paths_base)->inum;
 
@@ -2123,6 +2154,7 @@ static item_t* locate(rela_vm* vm, item_t key) {
 			}
 
 			frame -= FRAME;
+			frames--;
 		}
 	}
 	return NULL;
@@ -2135,7 +2167,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
 
 	if (!map && vec_size(vm, &cor->calls)) {
-		item_t* local = locate(vm, key);
+		item_t* local = locate(vm, key, 1);
 		if (local) {
 			*local = val;
 		}
@@ -2150,7 +2182,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 }
 
 static bool find(rela_vm* vm, item_t key, item_t* val) {
-	item_t* local = locate(vm, key);
+	item_t* local = locate(vm, key, 100);
 
 	if (local) {
 		*val = *local;
@@ -2259,7 +2291,10 @@ static void set(rela_vm* vm, item_t dst, item_t key, item_t val) {
 	else {
 		char tmpA[STRTMP];
 		char tmpB[STRTMP];
-		ensure(vm, 0, "cannot set %s in item %s", tmptext(vm, key, tmpA, sizeof(tmpA)), tmptext(vm, key, tmpB, sizeof(tmpB)));
+		ensure(vm, 0, "cannot set %s (%s) in item %s (%s)",
+			tmptext(vm, key, tmpA, sizeof(tmpA)), type_names[key.type],
+			tmptext(vm, val, tmpB, sizeof(tmpB)), type_names[dst.type]
+		);
 	}
 }
 
@@ -2285,7 +2320,10 @@ static item_t get(rela_vm* vm, item_t src, item_t key) {
 	else {
 		char tmpA[STRTMP];
 		char tmpB[STRTMP];
-		ensure(vm, 0, "cannot get %s from item %s", tmptext(vm, key, tmpA, sizeof(tmpA)), tmptext(vm, key, tmpB, sizeof(tmpB)));
+		ensure(vm, 0, "cannot get %s (%s) from item %s (%s)",
+			tmptext(vm, key, tmpA, sizeof(tmpA)), type_names[key.type],
+			tmptext(vm, src, tmpB, sizeof(tmpB)), type_names[src.type]
+		);
 	}
 	return nil(vm);
 }
