@@ -222,7 +222,7 @@ typedef struct _rela_vm {
 
 	// compiled "bytecode"
 	struct {
-		code_t cells[1000];
+		code_t cells[10000];
 		int depth;
 		int start;
 	} code;
@@ -724,8 +724,8 @@ static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	if (a.type == USERDATA) snprintf(tmp, size, "%s", type_names[a.type]);
 	if (a.type == NODE) snprintf(tmp, size, "%s", type_names[a.type]);
 
-	char subtmpA[50];
-	char subtmpB[50];
+	char subtmpA[STRTMP];
+	char subtmpB[STRTMP];
 
 	if (a.type == VECTOR) {
 		int len = snprintf(tmp, size, "[");
@@ -758,6 +758,7 @@ static cor_t* cor_allot(rela_vm* vm) {
 }
 
 static code_t* compile(rela_vm* vm, int op) {
+	ensure(vm, vm->code.depth < sizeof(vm->code.cells)/sizeof(code_t), "out of code space");
 	code_t* c = &vm->code.cells[vm->code.depth++];
 	c->op = op;
 	c->item.type = NIL;
@@ -2765,7 +2766,7 @@ bool rela_is_nil(rela_vm* vm, rela_item opaque) {
 
 bool rela_is_number(rela_vm* vm, rela_item opaque) {
 	item_t item = *((item_t*)&opaque);
-	return item.type == FLOAT;
+	return item.type == FLOAT || item.type == INTEGER;
 }
 
 bool rela_is_integer(rela_vm* vm, rela_item opaque) {
@@ -2842,8 +2843,8 @@ const char* rela_to_text(rela_vm* vm, rela_item opaque, char* tmp, size_t size) 
 double rela_to_number(rela_vm* vm, rela_item opaque) {
 	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
-	ensure(vm, item.type == FLOAT, "item is not a float: %s", tmptext(vm, item, tmp, sizeof(tmp)));
-	return item.fnum;
+	ensure(vm, item.type == FLOAT || item.type == INTEGER, "item is not a number: %s", tmptext(vm, item, tmp, sizeof(tmp)));
+	return item.type == FLOAT ? item.fnum: item.inum;
 }
 
 int64_t rela_to_integer(rela_vm* vm, rela_item opaque) {
