@@ -222,7 +222,7 @@ typedef struct _rela_vm {
 
 	// compiled "bytecode"
 	struct {
-		code_t cells[10000];
+		code_t* cells;
 		int depth;
 		int start;
 	} code;
@@ -282,6 +282,10 @@ static int parse_node(rela_vm* vm, const char *source);
 #define COR_RUNNING 1
 #define COR_DEAD 2
 
+static void checkmem(rela_vm* vm) {
+	ensure(vm, vm->general.bytes + vm->vectors.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
+}
+
 static void* region_allot(region_t* region, size_t bytes) {
 	void* ptr = calloc(bytes,1);
 	if (!ptr) exit(1);
@@ -319,7 +323,7 @@ static void region_truncate(region_t* region) {
 
 static void* allot(rela_vm* vm, size_t bytes) {
 	void* ptr = region_allot(&vm->general, bytes);
-	ensure(vm, vm->general.bytes + vm->vectors.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
+	checkmem(vm);
 	return ptr;
 }
 
@@ -355,7 +359,7 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 
 	vec->items[index].type = NIL;
 
-	ensure(vm, vm->general.bytes + vm->vectors.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
+	checkmem(vm);
 	return &vec->items[index];
 }
 
@@ -744,48 +748,52 @@ static cor_t* cor_allot(rela_vm* vm) {
 	return allot(vm, sizeof(cor_t));
 }
 
-static code_t* compile(rela_vm* vm, int op, item_t item) {
-	ensure(vm, vm->code.depth < sizeof(vm->code.cells)/sizeof(code_t), "out of code space");
+static code_t* compiled(rela_vm* vm, int offset) {
+	return &vm->code.cells[offset < 0 ? vm->code.depth+offset: offset];
+}
+
+static int compile(rela_vm* vm, int op, item_t item) {
+	vm->code.cells = realloc(vm->code.cells, sizeof(code_t)*(vm->code.depth+10));
 
 	// peephole
 	if (vm->code.depth > 0) {
-		code_t* last = &vm->code.cells[vm->code.depth-1];
+		code_t* last = compiled(vm, -1);
 
 		// marks,mark -> marks+1
 		if (op == OP_MARK && last->op == OPP_MARKS) {
 			last->item.inum++;
-			return last;
+			return vm->code.depth-1;
 		}
 
 		// mark,mark -> marks2
 		if (op == OP_MARK && last->op == OP_MARK) {
 			last->op = OPP_MARKS;
 			last->item = integer(vm, 2);
-			return last;
+			return vm->code.depth-1;
 		}
 
 		// lit,find -> fname
 		if (op == OP_FIND && last->op == OP_LIT) {
 			last->op = OPP_FNAME;
-			return last;
+			return vm->code.depth-1;
 		}
 
 		// lit,get -> gname
 		if (op == OP_GET && last->op == OP_LIT) {
 			last->op = OPP_GNAME;
-			return last;
+			return vm->code.depth-1;
 		}
 
 		// fname,call -> cname
 		if (op == OP_CALL && last->op == OPP_FNAME) {
 			last->op = OPP_CNAME;
-			return last;
+			return vm->code.depth-1;
 		}
 
 		// unmap,limit0 -> unmapl
 		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 1 && last->op == OP_UNMAP) {
 			last->op = OPP_UNMAP;
-			return last;
+			return vm->code.depth-1;
 		}
 
 		// mark,lit,lit,assign,limit0 -> a2lit
@@ -799,7 +807,7 @@ static code_t* compile(rela_vm* vm, int op, item_t item) {
 				vm->code.cells[vm->code.depth-4] = vm->code.cells[vm->code.depth-3];
 				vm->code.cells[vm->code.depth-3] = (code_t){.op = OPP_A2LIT, .item = key};
 				vm->code.depth-=2;
-				return &vm->code.cells[vm->code.depth-1];
+				return vm->code.depth-1;
 			}
 		}
 
@@ -808,7 +816,7 @@ static code_t* compile(rela_vm* vm, int op, item_t item) {
 			bool assign = last->op == OP_ASSIGN && last->item.type == INTEGER && last->item.inum == 0;
 			if (assign) {
 				last->op = OPP_ASSIGNL;
-				return last;
+				return vm->code.depth-1;
 			}
 		}
 
@@ -820,20 +828,18 @@ static code_t* compile(rela_vm* vm, int op, item_t item) {
 			if (mark && lit) {
 				vm->code.cells[vm->code.depth-2] = vm->code.cells[vm->code.depth-1];
 				vm->code.depth--;
-				return &vm->code.cells[vm->code.depth-1];
+				return vm->code.depth-1;
 			}
 			if (marks && lit) {
 				vm->code.cells[vm->code.depth-2].item.inum--;
 				vm->code.depth--;
-				return &vm->code.cells[vm->code.depth-1];
+				return vm->code.depth-1;
 			}
 		}
 	}
 
-	code_t* code = &vm->code.cells[vm->code.depth++];
-	code->op = op;
-	code->item = item;
-	return code;
+	vm->code.cells[vm->code.depth++] = (code_t){.op = op, .item = item};
+	return vm->code.depth-1;
 }
 
 static cor_t* routine(rela_vm* vm) {
@@ -1597,15 +1603,15 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		assert(!node->args);
 
 		compile(vm, OP_MARK, nil(vm));
-		code_t *entry = compile(vm, OP_LIT, nil(vm));
+		int entry = compile(vm, OP_LIT, nil(vm));
 
 		if (node->item.type) {
 			compile(vm, OP_LIT, node->item);
 			compile(vm, OP_ASSIGN, integer(vm, 0));
 		}
 
-		code_t *jump = compile(vm, OP_JMP, nil(vm));
-		entry->item = (item_t){.type = SUBROUTINE, .sub = vm->code.depth};
+		int jump = compile(vm, OP_JMP, nil(vm));
+		compiled(vm, entry)->item = (item_t){.type = SUBROUTINE, .sub = vm->code.depth};
 
 		compile(vm, OP_PID, integer(vm, node->fpath.id));
 		for (int i = 0, l = node->fpath.depth; i < l; i++) {
@@ -1624,7 +1630,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		// will be dead code
 		compile(vm, OP_CLEAN, nil(vm));
 		compile(vm, OP_RETURN, nil(vm));
-		jump->item = integer(vm, vm->code.depth);
+		compiled(vm, jump)->item = integer(vm, vm->code.depth);
 		// will sub dead code
 
 		compile(vm, OP_LIMIT, integer(vm, 1));
@@ -1643,9 +1649,9 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		if (node->opcode == OP_AND || node->opcode == OP_OR) {
 			process(vm, vec_get(vm, &node->vals, 0).node, 0, 0);
-			code_t *jump = compile(vm, node->opcode, nil(vm));
+			int jump = compile(vm, node->opcode, nil(vm));
 			process(vm, vec_get(vm, &node->vals, 1).node, 0, 0);
-			jump->item = integer(vm, vm->code.depth);
+			compiled(vm, jump)->item = integer(vm, vm->code.depth);
 		}
 		else {
 			for (int i = 0; i < vec_size(vm, &node->vals); i++)
@@ -1764,7 +1770,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			process(vm, node->args, 0, 0);
 
 		// if false, jump to else/end
-		code_t *jump = compile(vm, OP_JFALSE, nil(vm));
+		int jump = compile(vm, OP_JFALSE, nil(vm));
 		compile(vm, OP_DROP, nil(vm));
 
 		// success block
@@ -1774,18 +1780,18 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		// optional failure block
 		if (vec_size(vm, &node->keys)) {
 			// jump success path past failure block
-			code_t *jump2 = compile(vm, OP_JMP, nil(vm));
-			jump->item = integer(vm, vm->code.depth);
+			int jump2 = compile(vm, OP_JMP, nil(vm));
+			compiled(vm, jump)->item = integer(vm, vm->code.depth);
 			compile(vm, OP_DROP, nil(vm));
 
 			// failure block
 			for (int i = 0; i < vec_size(vm, &node->keys); i++)
 				process(vm, vec_get(vm, &node->keys, i).node, 0, 0);
 
-			jump2->item = integer(vm, vm->code.depth);
+			compiled(vm, jump2)->item = integer(vm, vm->code.depth);
 		}
 		else {
-			jump->item = integer(vm, vm->code.depth);
+			compiled(vm, jump)->item = integer(vm, vm->code.depth);
 		}
 
 		ensure(vm, !assigning, "cannot assign to if block");
@@ -1796,7 +1802,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		assert(&node->vals);
 
 		compile(vm, OP_MARK, nil(vm));
-		code_t *loop = compile(vm, OP_LOOP, nil(vm));
+		int loop = compile(vm, OP_LOOP, nil(vm));
 		int begin = vm->code.depth;
 
 		// condition(s)
@@ -1804,7 +1810,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			process(vm, node->args, 0, 0);
 
 		// if false, jump to end
-		code_t *iter = compile(vm, OP_JFALSE, nil(vm));
+		int iter = compile(vm, OP_JFALSE, nil(vm));
 		compile(vm, OP_DROP, nil(vm));
 
 		// do ... end
@@ -1813,8 +1819,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
-		iter->item = integer(vm, vm->code.depth);
-		loop->item = integer(vm, vm->code.depth);
+		compiled(vm, iter)->item = integer(vm, vm->code.depth);
+		compiled(vm, loop)->item = integer(vm, vm->code.depth);
 		compile(vm, OP_UNLOOP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 0));
 
@@ -1833,16 +1839,15 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_LIT, integer(vm, 0));
 
 		compile(vm, OP_MARK, nil(vm));
-		code_t *loop = compile(vm, OP_LOOP, nil(vm));
+		int loop = compile(vm, OP_LOOP, nil(vm));
 
 		int begin = vm->code.depth;
 
-		code_t *iter = compile(vm, OP_FOR, nil(vm));
 		// OP_FOR expects a vector with key[,val] variable names
 		// but node freed after compilation so can't &node->keys
 		vec_t* vec = vec_allot(vm);
 		*vec = node->keys;
-		iter->item = (item_t){.type = VECTOR, .vec = vec};
+		compile(vm, OP_FOR, (item_t){.type = VECTOR, .vec = vec});
 
 		// block
 		for (int i = 0; i < vec_size(vm, &node->vals); i++)
@@ -1850,8 +1855,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
-		vec_push(vm, iter->item.vec, integer(vm, vm->code.depth));
-		loop->item = integer(vm, vm->code.depth);
+		vec_push(vm, vec, integer(vm, vm->code.depth));
+		compiled(vm, loop)->item = integer(vm, vm->code.depth);
 		compile(vm, OP_UNLOOP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 0));
 		compile(vm, OP_LIMIT, integer(vm, 0));
@@ -2767,7 +2772,7 @@ static void destroy(rela_vm* vm) {
 	vm->strings.start = 0;
 	vm->strings.region.start = 0;
 	reset(vm);
-//	free(vm->code.cells);
+	free(vm->code.cells);
 	free(vm->general.cells);
 	free(vm->prepare.cells);
 	free(vm->strings.cells);
