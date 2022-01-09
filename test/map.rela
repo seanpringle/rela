@@ -8,3 +8,18 @@ stuff.b = nil
 
 assert(stuff.b == nil)
 assert(#stuff == 1)
+
+a = {
+	af = "alpha",
+}
+
+b = {
+	bf = "beta",
+}
+
+for k,v in b
+	a[k] = v
+end
+
+assert(a.af == "alpha")
+assert(a.bf == "beta")

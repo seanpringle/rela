@@ -273,7 +273,7 @@ static int parse_node(rela_vm* vm, const char *source);
 #define RESULTS_ALL -1
 
 #define PARSE_GREEDY 1
-#define PARSE_KEYVAL 2
+#define PARSE_UNGREEDY 2
 
 #define PROCESS_ASSIGN (1<<0)
 #define PROCESS_CHAIN (1<<1)
@@ -512,8 +512,6 @@ static int str_lower_bound(rela_vm* vm, const char *str) {
 }
 
 static const char* strintern(rela_vm* vm, const char* str) {
-	ensure(vm, str, "strintern() null string");
-
 	int index = str_lower_bound(vm, str);
 
 	if (index < vm->strings.depth && vm->strings.cells[index] == str) {
@@ -528,8 +526,7 @@ static const char* strintern(rela_vm* vm, const char* str) {
 	char* cpy = region_allot(&vm->strings.region, len+1);
 	memmove(cpy, str, len);
 
-	vm->strings.depth++;
-	vm->strings.cells = realloc(vm->strings.cells, vm->strings.depth * sizeof(char*));
+	vm->strings.cells = realloc(vm->strings.cells, ++vm->strings.depth * sizeof(char*));
 
 	if (index < vm->strings.depth-1) {
 		memmove(&vm->strings.cells[index+1], &vm->strings.cells[index], (vm->strings.depth - index - 1) * sizeof(char*));
@@ -603,6 +600,8 @@ static int str_scan(const char *source, strcb cb) {
 }
 
 static void reset(rela_vm* vm) {
+	fprintf(stderr, "%lu bytes\n", vm->general.bytes + vm->strings.region.bytes + vm->vectors.bytes);
+
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
 	region_truncate(&vm->general);
 	region_truncate(&vm->vectors);
@@ -687,16 +686,16 @@ static item_t add(rela_vm* vm, item_t a, item_t b) {
 static item_t multiply(rela_vm* vm, item_t a, item_t b) {
 	if (a.type == INTEGER && b.type == INTEGER) return (item_t){.type = INTEGER, .inum = a.inum * b.inum};
 	if (a.type == INTEGER && b.type == FLOAT) return (item_t){.type = INTEGER, .inum = a.inum * b.fnum};
-	if (a.type == FLOAT && b.type == INTEGER) return (item_t){.type = FLOAT, .inum = a.fnum * b.inum};
-	if (a.type == FLOAT && b.type == FLOAT) return (item_t){.type = FLOAT, .inum = a.fnum * b.fnum};
+	if (a.type == FLOAT && b.type == INTEGER) return (item_t){.type = FLOAT, .fnum = a.fnum * b.inum};
+	if (a.type == FLOAT && b.type == FLOAT) return (item_t){.type = FLOAT, .fnum = a.fnum * b.fnum};
 	return nil(vm);
 }
 
 static item_t divide(rela_vm* vm, item_t a, item_t b) {
 	if (a.type == INTEGER && b.type == INTEGER) return (item_t){.type = INTEGER, .inum = a.inum / b.inum};
 	if (a.type == INTEGER && b.type == FLOAT) return (item_t){.type = INTEGER, .inum = a.inum / b.fnum};
-	if (a.type == FLOAT && b.type == INTEGER) return (item_t){.type = FLOAT, .inum = a.fnum / b.inum};
-	if (a.type == FLOAT && b.type == FLOAT) return (item_t){.type = FLOAT, .inum = a.fnum / b.fnum};
+	if (a.type == FLOAT && b.type == INTEGER) return (item_t){.type = FLOAT, .fnum = a.fnum / b.inum};
+	if (a.type == FLOAT && b.type == FLOAT) return (item_t){.type = FLOAT, .fnum = a.fnum / b.fnum};
 	return nil(vm);
 }
 
@@ -1254,21 +1253,6 @@ static int parse_node(rela_vm* vm, const char *source) {
 		offset += end - &source[offset];
 	}
 	else
-	if (source[offset] == '[' && source[offset+1] == '[') {
-		node->type = NODE_LITERAL;
-
-		const char *start = &source[offset+2];
-		const char *end = start;
-
-		while (*end && !(end[0] == ']' && end[1] == ']'))
-			end = strchr(end, ']');
-
-		ensure(vm, end[0] == ']' && end[1] == ']', "expected closing bracket: %s", &source[offset]);
-
-		node->item = string(vm, substr(vm, start, 0, end - start));
-		offset += end - &source[offset] + 2;
-	}
-	else
 	if (isdigit(source[offset])) {
 		node->type = NODE_LITERAL;
 		char *a = NULL, *b = NULL;
@@ -1282,11 +1266,19 @@ static int parse_node(rela_vm* vm, const char *source) {
 	if (source[offset] == '[') {
 		offset++;
 		node->type = NODE_VEC;
-		offset += skip_gap(&source[offset]);
-		if (source[offset] != ']') {
-			offset += parse(vm, &source[offset], RESULTS_ALL, PARSE_GREEDY);
-			node->args = pop(vm).node;
-			offset += skip_gap(&source[offset]);
+		while (source[offset] && source[offset] != ']') {
+			if ((length = skip_gap(&source[offset])) > 0)
+			{
+				offset += length;
+				continue;
+			}
+			if (source[offset] == ',')
+			{
+				offset++;
+				continue;
+			}
+			offset += parse_node(vm, &source[offset]);
+			vec_push(vm, &node->vals, pop(vm));
 		}
 		ensure(vm, source[offset] == ']', "expected closing bracket: %s", &source[offset]);
 		offset++;
@@ -1296,25 +1288,26 @@ static int parse_node(rela_vm* vm, const char *source) {
 		offset++;
 		node->type = NODE_MAP;
 
-		while (source[offset]) {
+		while (source[offset] && source[offset] != '}') {
 			if ((length = skip_gap(&source[offset])) > 0)
 			{
 				offset += length;
 				continue;
-			}
-			if (source[offset] == '}')
-			{
-				offset++;
-				break;
 			}
 			if (source[offset] == ',')
 			{
 				offset++;
 				continue;
 			}
-			offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_KEYVAL);
-			vec_push(vm, &node->vals, pop(vm));
+			const char* left = &source[offset];
+			offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_UNGREEDY);
+			item_t pair = pop(vm);
+			ensure(vm, pair.node->type == NODE_MULTI && vec_size(vm, &pair.node->keys) == 1 && vec_size(vm, &pair.node->vals) == 1,
+				"expected key/val pair: %s", left);
+			vec_push(vm, &node->vals, pair);
 		}
+		ensure(vm, source[offset] == '}', "expected closing brace: %s", &source[offset]);
+		offset++;
 	}
 	else {
 		ensure(vm, 0, "what: %s", &source[offset]);
@@ -1574,7 +1567,12 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			compile(vm, OP_LIT, node->item);
 
 			if (assigning) {
-				if (node->index || node->field) {
+				if (node->index) {
+					compile(vm, OP_FIND, nil(vm));
+					compile(vm, OP_SET, nil(vm));
+				}
+
+				if (node->field) {
 					compile(vm, OP_SET, nil(vm));
 				}
 
@@ -1583,7 +1581,12 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 				}
 			}
 			else {
-				if (node->index || node->field) {
+				if (node->index) {
+					compile(vm, OP_FIND, nil(vm));
+					compile(vm, OP_GET, nil(vm));
+				}
+
+				if (node->field) {
 					compile(vm, OP_GET, nil(vm));
 				}
 
@@ -1740,7 +1743,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			tmptext(vm, node->item, tmp, sizeof(tmp)));
 
 		// special case allows: "complex-string" = value in map literals
-		if (assigning && node->item.type == STRING) {
+		if (!node->index && assigning && node->item.type == STRING) {
 			compile(vm, OP_ASSIGN, integer(vm, index));
 		}
 	}
@@ -1882,6 +1885,9 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		if (node->args)
 			process(vm, node->args, 0, 0);
+
+		for (int i = 0; i < vec_size(vm, &node->vals); i++)
+			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
 
 		compile(vm, OP_VECTOR, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 1));
@@ -2785,9 +2791,6 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
 	if (!vm) exit(1);
 
-	fprintf(stderr, "item_t %lu\n", sizeof(item_t));
-	fprintf(stderr, "code_t %lu\n", sizeof(code_t));
-
 	vm->custom = custom;
 	vm->memory_limit = memory;
 
@@ -2854,12 +2857,26 @@ void rela_decompile(rela_vm* vm) {
 		decompile(vm, &vm->code.cells[i]);
 }
 
+void* rela_allot(rela_vm* vm, size_t bytes) {
+	return allot(vm, bytes);
+}
+
 size_t rela_depth(rela_vm* vm) {
 	return depth(vm);
 }
 
 void rela_push(rela_vm* vm, rela_item opaque) {
 	push(vm, *((item_t*)&opaque));
+}
+
+rela_item rela_nil(rela_vm* vm) {
+	push(vm, nil(vm));
+	return rela_pop(vm);
+}
+
+rela_item rela_make_bool(rela_vm* vm, bool b) {
+	push(vm, (item_t){.type = BOOLEAN, .flag = b});
+	return rela_pop(vm);
 }
 
 rela_item rela_make_number(rela_vm* vm, double val) {
@@ -2882,6 +2899,16 @@ rela_item rela_make_data(rela_vm* vm, void* data) {
 	return rela_pop(vm);
 }
 
+rela_item rela_make_vector(rela_vm* vm) {
+	push(vm, (item_t){.type = VECTOR, .vec = vec_allot(vm)});
+	return rela_pop(vm);
+}
+
+rela_item rela_make_map(rela_vm* vm) {
+	push(vm, (item_t){.type = MAP, .map = map_allot(vm)});
+	return rela_pop(vm);
+}
+
 rela_item rela_pop(rela_vm* vm) {
 	rela_item opaque;
 	*((item_t*)&opaque) = pop(vm);
@@ -2897,6 +2924,11 @@ rela_item rela_pick(rela_vm* vm, int pos) {
 bool rela_is_nil(rela_vm* vm, rela_item opaque) {
 	item_t item = *((item_t*)&opaque);
 	return item.type == NIL;
+}
+
+bool rela_is_bool(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return item.type == BOOLEAN;
 }
 
 bool rela_is_number(rela_vm* vm, rela_item opaque) {
@@ -2927,6 +2959,11 @@ bool rela_is_vector(rela_vm* vm, rela_item opaque) {
 bool rela_is_map(rela_vm* vm, rela_item opaque) {
 	item_t item = *((item_t*)&opaque);
 	return item.type == MAP;
+}
+
+bool rela_truth(rela_vm* vm, rela_item opaque) {
+	item_t item = *((item_t*)&opaque);
+	return truth(vm, item);
 }
 
 size_t rela_count(rela_vm* vm, rela_item opaque) {
@@ -2973,6 +3010,13 @@ rela_item rela_map_key(rela_vm* vm, rela_item con, int index) {
 const char* rela_to_text(rela_vm* vm, rela_item opaque, char* tmp, size_t size) {
 	item_t item = *((item_t*)&opaque);
 	return tmptext(vm, item, tmp, size);
+}
+
+bool rela_to_bool(rela_vm* vm, rela_item opaque) {
+	char tmp[STRTMP];
+	item_t item = *((item_t*)&opaque);
+	ensure(vm, item.type == BOOLEAN, "item is not a boolean: %s", tmptext(vm, item, tmp, sizeof(tmp)));
+	return item.flag;
 }
 
 double rela_to_number(rela_vm* vm, rela_item opaque) {

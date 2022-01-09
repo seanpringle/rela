@@ -61,13 +61,18 @@ int rela_run(rela_vm* rela);
 void* rela_custom(rela_vm* rela);
 void rela_destroy(rela_vm* rela);
 void rela_decompile(rela_vm* rela);
+void* rela_allot(rela_vm* rela, size_t bytes);
 
 // Number of stack items supplied to a callback
 size_t rela_depth(rela_vm* rela);
 void rela_push(rela_vm* rela, rela_item item);
+rela_item rela_nil(rela_vm* rela);
+rela_item rela_make_bool(rela_vm* rela, bool flag);
 rela_item rela_make_number(rela_vm* rela, double val);
 rela_item rela_make_integer(rela_vm* rela, int64_t val);
 rela_item rela_make_string(rela_vm* rela, const char* str);
+rela_item rela_make_vector(rela_vm* rela);
+rela_item rela_make_map(rela_vm* rela);
 rela_item rela_make_data(rela_vm* rela, void* data);
 
 rela_item rela_pop(rela_vm* rela);
@@ -76,6 +81,7 @@ rela_item rela_top(rela_vm* rela);
 // index<=-1 from stack top
 rela_item rela_pick(rela_vm* rela, int index);
 bool rela_is_nil(rela_vm*, rela_item item);
+bool rela_is_bool(rela_vm*, rela_item item);
 bool rela_is_number(rela_vm*, rela_item item);
 bool rela_is_integer(rela_vm*, rela_item item);
 bool rela_is_string(rela_vm*, rela_item item);
@@ -83,6 +89,7 @@ bool rela_is_data(rela_vm*, rela_item item);
 bool rela_is_vector(rela_vm*, rela_item item);
 bool rela_is_map(rela_vm*, rela_item item);
 
+bool rela_truth(rela_vm* vm, rela_item item);
 size_t rela_count(rela_vm* vm, rela_item vec);
 
 rela_item rela_vector_get(rela_vm* vm, rela_item con, int index);
@@ -93,6 +100,7 @@ rela_item rela_map_key(rela_vm* vm, rela_item con, int index);
 void rela_map_set(rela_vm* vm, rela_item con, rela_item key, rela_item val);
 
 const char* rela_to_text(rela_vm* vm, rela_item item, char* tmp, size_t size);
+bool rela_to_bool(rela_vm* rela, rela_item item);
 double rela_to_number(rela_vm* rela, rela_item item);
 int64_t rela_to_integer(rela_vm* rela, rela_item item);
 const char* rela_to_string(rela_vm* rela, rela_item item);
