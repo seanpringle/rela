@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <assert.h>
 #include <setjmp.h>
+#include <signal.h>
 
 #ifdef PCRE
 #include <pcre.h>
@@ -45,7 +46,7 @@ enum opcode_t {
 	OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT, OP_ASSIGN,
 	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
 	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SLURP, OP_SORT, OP_ASSERT, OP_PID,
-	OPP_MARKS, OPP_FNAME, OPP_GNAME, OPP_CNAME, OPP_A2LIT, OPP_ASSIGNL, OPP_UNMAP,
+	OPP_MARKS, OPP_FNAME, OPP_GNAME, OPP_CNAME, OPP_A2LIT, OPP_ASSIGNL, OPP_UNMAP, OP_GC,
 	OPERATIONS
 };
 
@@ -218,7 +219,24 @@ typedef struct _rela_vm {
 	size_t memory_limit;
 	region_t general;
 	region_t prepare;
-	region_t vectors;
+
+	struct {
+		vec_t cells[1000];
+		bool used[1000];
+		bool keep[1000];
+		bool mark[1000];
+		int next;
+		int extant;
+	} vecs;
+
+	struct {
+		map_t cells[1000];
+		bool used[1000];
+		bool keep[1000];
+		bool mark[1000];
+		int next;
+		int extant;
+	} maps;
 
 	// compiled "bytecode"
 	struct {
@@ -266,7 +284,7 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node);
 static int parse_arglist(rela_vm* vm, const char *source);
 static int parse_node(rela_vm* vm, const char *source);
 
-#define ensure(vm,c,...) if (!(c)) { snprintf(vm->err, sizeof(vm->err), __VA_ARGS__); longjmp(vm->jmp, 1); }
+#define ensure(vm,c,...) if (!(c)) { snprintf(vm->err, sizeof(vm->err), __VA_ARGS__); raise(SIGUSR1); /*longjmp(vm->jmp, 1);*/ }
 
 #define RESULTS_DISCARD 0
 #define RESULTS_FIRST 1
@@ -283,7 +301,7 @@ static int parse_node(rela_vm* vm, const char *source);
 #define COR_DEAD 2
 
 static void checkmem(rela_vm* vm) {
-	ensure(vm, vm->general.bytes + vm->vectors.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
+	ensure(vm, vm->general.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
 }
 
 static void* region_allot(region_t* region, size_t bytes) {
@@ -293,21 +311,6 @@ static void* region_allot(region_t* region, size_t bytes) {
 	region->cells = realloc(region->cells, (region->depth+1) * sizeof(allocation_t));
 	region->cells[region->depth++] = (allocation_t){.ptr = ptr, .bytes = bytes};
 	region->bytes += bytes;
-	return ptr;
-}
-
-static void* region_reallot(region_t* region, void* ptr, size_t bytes) {
-	for (int i = (int)region->depth-1; i >= 0; --i) {
-		allocation_t* allocation = &region->cells[i];
-		if (allocation->ptr != ptr) continue;
-		if (bytes <= allocation->bytes) break;
-		assert(region->bytes >= allocation->bytes);
-		region->bytes -= allocation->bytes;
-		allocation->ptr = realloc(ptr, bytes);
-		allocation->bytes = bytes;
-		region->bytes += allocation->bytes;
-		return allocation->ptr;
-	}
 	return ptr;
 }
 
@@ -327,11 +330,125 @@ static void* allot(rela_vm* vm, size_t bytes) {
 	return ptr;
 }
 
+static float memory_pressure(rela_vm* vm) {
+	float vecs = (float)vm->vecs.extant / (float)(sizeof(vm->vecs.cells)/sizeof(vec_t));
+	float maps = (float)vm->maps.extant / (float)(sizeof(vm->maps.cells)/sizeof(map_t));
+	return vecs > maps ? vecs: maps;
+}
+
+static size_t vec_size(rela_vm* vm, vec_t* vec);
+static item_t vec_get(rela_vm* vm, vec_t* vec, int i);
+static void gc_mark_vec(rela_vm* vm, vec_t* vec);
+static void gc_mark_map(rela_vm* vm, map_t* map);
+static void gc_mark_cor(rela_vm* vm, cor_t* cor);
+
+static void gc_mark_item(rela_vm* vm, item_t item) {
+	if (item.type == VECTOR) gc_mark_vec(vm, item.vec);
+	if (item.type == MAP) gc_mark_map(vm, item.map);
+	if (item.type == COROUTINE) gc_mark_cor(vm, item.cor);
+}
+
+static void gc_mark_vec(rela_vm* vm, vec_t* vec) {
+	if (!vec) return;
+	if (vm->vecs.cells <= vec && vec < &vm->vecs.cells[sizeof(vm->vecs.cells)/sizeof(vec_t)]) {
+		int i = vec - vm->vecs.cells;
+		if (vm->vecs.mark[i]) return;
+		assert(vm->vecs.used[i]);
+		vm->vecs.mark[i] = true;
+	}
+	for (int i = 0, l = vec_size(vm, vec); i < l; i++) {
+		gc_mark_item(vm, vec_get(vm, vec, i));
+	}
+}
+
+static void gc_mark_map(rela_vm* vm, map_t* map) {
+	if (!map) return;
+	if (vm->maps.cells <= map && map < &vm->maps.cells[sizeof(vm->maps.cells)/sizeof(map_t)]) {
+		int i = map - vm->maps.cells;
+		if (vm->maps.mark[i]) return;
+		assert(vm->maps.used[i]);
+		vm->maps.mark[i] = true;
+	}
+	for (int i = 0, l = vec_size(vm, &map->keys); i < l; i++) {
+		gc_mark_item(vm, vec_get(vm, &map->keys, i));
+		gc_mark_item(vm, vec_get(vm, &map->vals, i));
+	}
+}
+
+static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
+	if (!cor) return;
+	gc_mark_vec(vm, &cor->stack);
+	gc_mark_vec(vm, &cor->other);
+	gc_mark_vec(vm, &cor->maps);
+	gc_mark_vec(vm, &cor->locals);
+	gc_mark_vec(vm, &cor->calls);
+	gc_mark_vec(vm, &cor->loops);
+	gc_mark_vec(vm, &cor->marks);
+	gc_mark_vec(vm, &cor->paths);
+}
+
+static void gc_keep_extant(rela_vm* vm) {
+	for (int i = 0, l = sizeof(vm->vecs.cells)/sizeof(vec_t); i < l; i++) {
+		if (vm->vecs.used[i]) vm->vecs.keep[i] = true;
+	}
+	for (int i = 0, l = sizeof(vm->maps.cells)/sizeof(map_t); i < l; i++) {
+		if (vm->maps.used[i]) vm->maps.keep[i] = true;
+	}
+}
+
+static void gc(rela_vm* vm) {
+	memset(vm->vecs.mark, 0, sizeof(vm->vecs.mark));
+	memset(vm->maps.mark, 0, sizeof(vm->maps.mark));
+	gc_mark_map(vm, &vm->scope_core);
+	gc_mark_map(vm, vm->scope_global);
+	for (int i = 0, l = vec_size(vm, &vm->routines); i < l; i++) {
+		gc_mark_cor(vm, vec_get(vm, &vm->routines, i).cor);
+	}
+	int freedVecs = 0;
+	for (int i = 0, l = sizeof(vm->vecs.cells)/sizeof(vec_t); i < l; i++) {
+		if (vm->vecs.used[i] && !vm->vecs.mark[i] && !vm->vecs.keep[i]) {
+			vec_t* vec = &vm->vecs.cells[i];
+			free(vec->items);
+			memset(vec, 0, sizeof(vec_t));
+			vm->vecs.used[i] = false;
+			--vm->vecs.extant;
+			assert(vm->vecs.extant >= 0);
+			freedVecs++;
+		}
+	}
+	int freedMaps = 0;
+	for (int i = 0, l = sizeof(vm->maps.cells)/sizeof(map_t); i < l; i++) {
+		if (vm->maps.used[i] && !vm->maps.mark[i] && !vm->maps.keep[i]) {
+			map_t* map = &vm->maps.cells[i];
+			free(map->keys.items);
+			free(map->vals.items);
+			memset(map, 0, sizeof(map_t));
+			vm->maps.used[i] = false;
+			--vm->maps.extant;
+			assert(vm->maps.extant >= 0);
+			freedMaps++;
+		}
+	}
+	fprintf(stderr, "GC freed %d maps %d vecs\n", freedMaps, freedVecs);
+}
+
 static vec_t* vec_allot(rela_vm* vm) {
-	vec_t* vec = allot(vm, sizeof(vec_t));
-	vec->items = NULL;
-	vec->count = 0;
-	return vec;
+	for (int tries = 0, i = vm->vecs.next; tries < 2; tries++, i = 0) {
+		while (i < sizeof(vm->vecs.cells)/sizeof(vec_t)) {
+			if (!vm->vecs.used[i]) {
+				vm->vecs.used[i] = true;
+				vec_t* vec = &vm->vecs.cells[i];
+				memset(vec, 0, sizeof(vec_t));
+				vm->vecs.next = i+1;
+				vm->vecs.extant++;
+				return vec;
+			}
+			i++;
+		}
+		gc(vm);
+	}
+	ensure(vm, false, "vec_allot() out of memory");
+	return NULL;
 }
 
 static size_t vec_size(rela_vm* vm, vec_t* vec) {
@@ -343,7 +460,7 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 
 	if (!vec->items) {
 		assert(vec->count == 0);
-		vec->items = region_allot(&vm->vectors, sizeof(item_t) * 8);
+		vec->items = malloc(sizeof(item_t) * 8);
 	}
 
 	vec->count++;
@@ -352,7 +469,7 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 	bool power_of_2 = size > 0 && (size & (size - 1)) == 0;
 
 	if (power_of_2 && size >= 8)
-		vec->items = region_reallot(&vm->vectors, vec->items, sizeof(item_t) * (size * 2));
+		vec->items = realloc(vec->items, sizeof(item_t) * (size * 2));
 
 	if (index < vec->count-1)
 		memmove(&vec->items[index+1], &vec->items[index], (vec->count - index - 1) * sizeof(item_t));
@@ -447,7 +564,22 @@ static void vec_clear(rela_vm* vm, vec_t* vec) {
 }
 
 static map_t* map_allot(rela_vm* vm) {
-	return allot(vm, sizeof(map_t));
+	for (int tries = 0, i = vm->maps.next; tries < 2; tries++, i = 0) {
+		while (i < sizeof(vm->maps.cells)/sizeof(map_t)) {
+			if (!vm->maps.used[i]) {
+				vm->maps.used[i] = true;
+				map_t* map = &vm->maps.cells[i];
+				memset(map, 0, sizeof(map_t));
+				vm->maps.next = i+1;
+				vm->maps.extant++;
+				return map;
+			}
+			i++;
+		}
+		gc(vm);
+	}
+	ensure(vm, false, "map_allot() out of memory");
+	return NULL;
 }
 
 static int map_lower_bound(rela_vm* vm, map_t* map, item_t key) {
@@ -600,19 +732,18 @@ static int str_scan(const char *source, strcb cb) {
 }
 
 static void reset(rela_vm* vm) {
-	fprintf(stderr, "%lu bytes\n", vm->general.bytes + vm->strings.region.bytes + vm->vectors.bytes);
+	vm->scope_global = NULL;
+
+	gc(vm);
 
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
 	region_truncate(&vm->general);
-	region_truncate(&vm->vectors);
 
 	region_truncate(&vm->strings.region);
 	assert(vm->strings.region.depth == vm->strings.region.start);
 	strindex(vm);
 	assert(vm->strings.depth == vm->strings.start);
 	assert(vm->strings.depth == vm->strings.region.depth);
-
-	vm->scope_global = NULL;
 }
 
 static item_t nil(rela_vm* vm) {
@@ -2058,6 +2189,7 @@ static void op_global(rela_vm* vm) {
 static void call(rela_vm* vm, item_t item) {
 	if (item.type == CALLBACK) {
 		item.cb((rela_vm*)vm);
+		if (memory_pressure(vm) > 0.9) gc(vm);
 		return;
 	}
 
@@ -2774,7 +2906,6 @@ static void destroy(rela_vm* vm) {
 	}
 
 	vm->general.start = 0;
-	vm->vectors.start = 0;
 	vm->strings.start = 0;
 	vm->strings.region.start = 0;
 	reset(vm);
@@ -2783,7 +2914,6 @@ static void destroy(rela_vm* vm) {
 	free(vm->prepare.cells);
 	free(vm->strings.cells);
 	free(vm->strings.region.cells);
-	free(vm->vectors.cells);
 	free(vm);
 }
 
@@ -2831,8 +2961,9 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	vm->general.start = vm->general.depth;
 	vm->strings.start = vm->strings.depth;
 	vm->strings.region.start = vm->strings.region.depth;
-	vm->vectors.start = vm->vectors.depth;
 	region_truncate(&vm->prepare);
+	gc_keep_extant(vm);
+
 	return vm;
 }
 
