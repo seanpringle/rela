@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+static char* slurp(const char* script);
 
 void hello(rela_vm* rela) {
 	rela_push(rela, rela_make_string(rela, "hello world"));
@@ -32,6 +33,19 @@ void hello(rela_vm* rela) {
 rela_register registry[] = {
 	{"hello", hello},
 };
+
+int run(const char* source, bool decompile) {
+	rela_vm* rela = rela_create(source, NULL, 1, registry);
+	if (!rela) return 1;
+
+	int rc = rela_run(rela);
+
+	if (decompile) rela_decompile(rela);
+
+	rela_destroy(rela);
+
+	return rc;
+}
 
 int main(int argc, char* argv[]) {
 	bool decompile = false;
@@ -47,8 +61,18 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
-	char* source = NULL;
+	char* source = slurp(script);
 
+	if (!source) {
+		fprintf(stderr, "cannot read script file: %s", script);
+		exit(1);
+	}
+
+	return run(source, decompile);
+}
+
+static char* slurp(const char* script) {
+	char* source = NULL;
 	struct stat st;
 	if (stat(script, &st) == 0) {
 		FILE *file = fopen(script, "r");
@@ -64,21 +88,5 @@ int main(int argc, char* argv[]) {
 		}
 		fclose(file);
 	}
-
-	if (!source) {
-		fprintf(stderr, "cannot read script file");
-		exit(1);
-	}
-
-	rela_vm* rela = rela_create(source, NULL, sizeof(registry) / sizeof(rela_register), registry);
-
-	free(source);
-
-	if (!rela) exit(1);
-	if (decompile) rela_decompile(rela);
-
-	int rc = rela_run(rela);
-
-	rela_destroy(rela);
-	return rc;
+	return source;
 }
