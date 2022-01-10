@@ -68,8 +68,7 @@ embedded scripting language is the one you figure out how to avoid using at all!
 ## Keywords
 
 ```
-if else end while for break continue return function nil true false and or
-global lib print
+if else end while for break continue return function nil true false and or global lib print
 ```
 
 The `print` keyword can be overriden.
@@ -85,8 +84,8 @@ and or == != >= > <= < ~ + - * / %
 The `lib` namespace holds other functions:
 
 ```
-assert collect coroutine resume yield sort type sin cos tan asin acos atan sinh
-cosh tanh ceil floor sqrt abs atan2 log log10 pow min max
+assert collect coroutine resume yield sort type sin cos tan asin acos atan sinh cosh tanh ceil floor sqrt abs
+atan2 log log10 pow min max
 ```
 
 Any `lib` function can be assigned to a local variable for brevity and
