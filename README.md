@@ -3,38 +3,41 @@ Rela is a scripting language designed to:
 * Be small and self-contained with syntax mostly based on Lua
 * Be easy to embed with similar usage patterns to Lua (stack-based, callbacks etc)
 * Provide separate vector[] and map{} types, with vectors indexed from 0
-* Provide explicit coroutines and nested functions, but *not closures*
-* Use setjmp/longjmp only for emulating exceptions, not for switching coroutines
-* Use regional memory management without ref-counting, cycles or GC pauses
-* *Not* provide persistent global state across script executions
+* Provide explicit coroutines and nested functions, but not closures or metatables
+* Use setjmp/longjmp only for emulating exceptions, but not for switching coroutines
+* Use regional memory management without ref-counting, cycles or collection pauses
 * Use PCRE regex syntax
 
-## No persistent state
+## Basic workflow
 
-No persistent state means a Rela VM runs on a clean run-time state each time
-it is called, executing its compiled bytecode from the start and releasing
-all working memory at the end. If saving state is required it needs to be
-handled by registering custom callbacks. This moves the problem of managing
-state onto the host application and keeps Rela simple and predictable.
+* Create a Rela instance with `rela_create()`
+  * Pass in a script and a table of C callbacks
+  * Source code is compiled to byte code
+* Call `rela_run()` repeatedly
+  * Byte code executes each time on a fresh run-time state
+  * Persistence and global state done via callbacks as needed
+  * Run-time memory regions are released
+* Call `rela_destroy()`
 
 ## Memory management
 
 https://en.wikipedia.org/wiki/Region-based_memory_management
 
-Executing a script allocates memory across several internal regions which is
-cheap, fast and means internal objects can be removed from the stack and used
-by callbacks without risk of untimely garbage collection.
+Executing a script allocates memory from several internal regions which is cheap,
+fast and means internal objects can be removed from the stack and used by callbacks
+without risk of untimely garbage collection.
 
-There is a mark-and-sweep stop-the-world garbage collector that the VM
+There is a simple mark-and-sweep stop-the-world garbage collector that the VM
 guarantees never to implicitly trigger during execution. Instead, memory
 reclaimation occurs when:
 
-* `rela_create()` completes and compile-time memory is reset
-* `rela_run()` completes and the run-time memory is reset
+* `rela_create()` completes and compile-time regions are reset
+* `rela_run()` completes and run-time regions are reset
 * A callback explicitly calls `rela_collect()`
 * A script explicitly calls `lib.collect()`
 
-The host application can decide which approach is best for each use case.
+The host application can decide which approach is best. The best GC for an
+embedded scripting language is the one you figure out how to avoid using at all.
 
 ## Keywords
 
