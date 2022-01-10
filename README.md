@@ -73,12 +73,6 @@ if else end while for break continue return function nil true false and or globa
 
 The `print` keyword can be overriden.
 
-## Operators
-
-```
-and or == != >= > <= < ~ + - * / %
-```
-
 ## Standard library
 
 The `lib` namespace holds other functions:
