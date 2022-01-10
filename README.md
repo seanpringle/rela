@@ -14,11 +14,36 @@ Rela is a scripting language designed to:
 * Create a Rela instance with `rela_create()`
   * Pass in a script and a table of C callbacks
   * Source code is compiled to byte code
+
 * Call `rela_run()` repeatedly
   * Byte code executes each time on a fresh run-time state
   * Persistence and global state done via callbacks as needed
   * Run-time memory regions are released
+
 * Call `rela_destroy()`
+
+```c
+void hello(rela_vm* rela) {
+  rela_push(rela, rela_make_string(rela, "hello world"));
+}
+
+rela_register registry[] = {
+  {"hello", hello},
+};
+
+bool run(const char* source) {
+  int ok = false;
+
+  rela_vm* rela = rela_create(source, NULL, 1, registry);
+
+  if (rela) {
+    ok = rela_run(rela) == 0;
+    rela_destroy(rela);
+  }
+	 
+  return ok;
+}
+```
 
 ## Memory management
 
