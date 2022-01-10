@@ -4,7 +4,7 @@ Rela is a scripting language designed to:
 * Be easy to embed with similar usage patterns to Lua (stack-based, callbacks etc)
 * Provide separate vector[] and map{} types, with vectors indexed from 0
 * Provide explicit coroutines and nested functions, but not closures or metatables
-* Use setjmp/longjmp only for emulating exceptions, but not for switching coroutines
+* Use setjmp/longjmp for emulating exceptions, but not for switching coroutines
 * Use regional memory management without ref-counting, cycles or collection pauses
 * Use PCRE regex syntax
 
@@ -66,9 +66,10 @@ cosh tanh ceil floor sqrt abs atan2 log log10 pow min max
 Any `lib` function can be assigned to a local variable for brevity and
 performance.
 
-```
-min = lib.min
-print(min(2,1,3))
+```lua
+> min = lib.min
+> print(min(2,1,3))
+1
 ```
 
 ## PCRE
