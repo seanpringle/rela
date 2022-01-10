@@ -26,5 +26,8 @@ prof: rel
 test: dev
 	$(foreach script, $(wildcard test/*), echo $(script) && ./rela $(script) &&) true
 
+leak: dev
+	$(foreach script, $(wildcard test/*), echo $(script) && valgrind --leak-check=full ./rela $(script) &&) true
+
 clean:
 	rm -f rela librela.a *.o

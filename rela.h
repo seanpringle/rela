@@ -61,7 +61,6 @@ int rela_run(rela_vm* rela);
 void* rela_custom(rela_vm* rela);
 void rela_destroy(rela_vm* rela);
 void rela_decompile(rela_vm* rela);
-void* rela_allot(rela_vm* rela, size_t bytes);
 
 // Number of stack items supplied to a callback
 size_t rela_depth(rela_vm* rela);

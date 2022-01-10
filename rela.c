@@ -137,8 +137,8 @@ typedef struct _node_t {
 	struct _node_t *chain;
 	bool index;
 	bool field;
-	vec_t keys;
-	vec_t vals;
+	vec_t* keys;
+	vec_t* vals;
 	int results;
 	struct {
 		int id;
@@ -213,30 +213,40 @@ typedef struct _rela_vm {
 	// routines[1...n] resume/yield chain
 	vec_t routines;
 
-	map_t scope_core;
+	map_t* scope_core;
 	map_t* scope_global;
 
 	size_t memory_limit;
-	region_t general;
-	region_t prepare;
+	bool allow_gc;
+
+	struct {
+		node_t** cells;
+		int depth;
+	} nodes;
+
+	struct {
+		map_t cells[100];
+		bool used[100];
+		bool mark[100];
+		int next;
+		int extant;
+	} maps;
 
 	struct {
 		vec_t cells[1000];
 		bool used[1000];
-		bool keep[1000];
 		bool mark[1000];
 		int next;
 		int extant;
 	} vecs;
 
 	struct {
-		map_t cells[1000];
-		bool used[1000];
-		bool keep[1000];
-		bool mark[1000];
+		cor_t cells[100];
+		bool used[100];
+		bool mark[100];
 		int next;
 		int extant;
-	} maps;
+	} cors;
 
 	// compiled "bytecode"
 	struct {
@@ -301,7 +311,7 @@ static int parse_node(rela_vm* vm, const char *source);
 #define COR_DEAD 2
 
 static void checkmem(rela_vm* vm) {
-	ensure(vm, vm->general.bytes + vm->strings.region.bytes <= vm->memory_limit, "out of memory");
+	ensure(vm, vm->strings.region.bytes <= vm->memory_limit, "out of memory");
 }
 
 static void* region_allot(region_t* region, size_t bytes) {
@@ -322,12 +332,6 @@ static void region_truncate(region_t* region) {
 		region->bytes -= allocation->bytes;
 	}
 	region->depth = region->start;
-}
-
-static void* allot(rela_vm* vm, size_t bytes) {
-	void* ptr = region_allot(&vm->general, bytes);
-	checkmem(vm);
-	return ptr;
 }
 
 static float memory_pressure(rela_vm* vm) {
@@ -369,14 +373,18 @@ static void gc_mark_map(rela_vm* vm, map_t* map) {
 		assert(vm->maps.used[i]);
 		vm->maps.mark[i] = true;
 	}
-	for (int i = 0, l = vec_size(vm, &map->keys); i < l; i++) {
-		gc_mark_item(vm, vec_get(vm, &map->keys, i));
-		gc_mark_item(vm, vec_get(vm, &map->vals, i));
-	}
+	gc_mark_vec(vm, &map->keys);
+	gc_mark_vec(vm, &map->vals);
 }
 
 static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	if (!cor) return;
+	if (vm->cors.cells <= cor && cor < &vm->cors.cells[sizeof(vm->cors.cells)/sizeof(cor_t)]) {
+		int i = cor - vm->cors.cells;
+		if (vm->cors.mark[i]) return;
+		assert(vm->cors.used[i]);
+		vm->cors.mark[i] = true;
+	}
 	gc_mark_vec(vm, &cor->stack);
 	gc_mark_vec(vm, &cor->other);
 	gc_mark_vec(vm, &cor->maps);
@@ -387,26 +395,23 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	gc_mark_vec(vm, &cor->paths);
 }
 
-static void gc_keep_extant(rela_vm* vm) {
-	for (int i = 0, l = sizeof(vm->vecs.cells)/sizeof(vec_t); i < l; i++) {
-		if (vm->vecs.used[i]) vm->vecs.keep[i] = true;
-	}
-	for (int i = 0, l = sizeof(vm->maps.cells)/sizeof(map_t); i < l; i++) {
-		if (vm->maps.used[i]) vm->maps.keep[i] = true;
-	}
-}
-
 static void gc(rela_vm* vm) {
+	if (!vm->allow_gc) return;
+
 	memset(vm->vecs.mark, 0, sizeof(vm->vecs.mark));
 	memset(vm->maps.mark, 0, sizeof(vm->maps.mark));
-	gc_mark_map(vm, &vm->scope_core);
+	memset(vm->cors.mark, 0, sizeof(vm->cors.mark));
+	gc_mark_map(vm, vm->scope_core);
 	gc_mark_map(vm, vm->scope_global);
 	for (int i = 0, l = vec_size(vm, &vm->routines); i < l; i++) {
 		gc_mark_cor(vm, vec_get(vm, &vm->routines, i).cor);
 	}
+	for (int i = 0, l = vm->code.depth; i < l; i++) {
+		gc_mark_item(vm, vm->code.cells[i].item);
+	}
 	int freedVecs = 0;
 	for (int i = 0, l = sizeof(vm->vecs.cells)/sizeof(vec_t); i < l; i++) {
-		if (vm->vecs.used[i] && !vm->vecs.mark[i] && !vm->vecs.keep[i]) {
+		if (vm->vecs.used[i] && !vm->vecs.mark[i]) {
 			vec_t* vec = &vm->vecs.cells[i];
 			free(vec->items);
 			memset(vec, 0, sizeof(vec_t));
@@ -418,7 +423,7 @@ static void gc(rela_vm* vm) {
 	}
 	int freedMaps = 0;
 	for (int i = 0, l = sizeof(vm->maps.cells)/sizeof(map_t); i < l; i++) {
-		if (vm->maps.used[i] && !vm->maps.mark[i] && !vm->maps.keep[i]) {
+		if (vm->maps.used[i] && !vm->maps.mark[i]) {
 			map_t* map = &vm->maps.cells[i];
 			free(map->keys.items);
 			free(map->vals.items);
@@ -429,7 +434,26 @@ static void gc(rela_vm* vm) {
 			freedMaps++;
 		}
 	}
-	fprintf(stderr, "GC freed %d maps %d vecs\n", freedMaps, freedVecs);
+	int freedCors = 0;
+	for (int i = 0, l = sizeof(vm->cors.cells)/sizeof(cor_t); i < l; i++) {
+		if (vm->cors.used[i] && !vm->cors.mark[i]) {
+			cor_t* cor = &vm->cors.cells[i];
+			free(cor->stack.items);
+			free(cor->other.items);
+			free(cor->maps.items);
+			free(cor->locals.items);
+			free(cor->calls.items);
+			free(cor->loops.items);
+			free(cor->marks.items);
+			free(cor->paths.items);
+			memset(cor, 0, sizeof(cor_t));
+			vm->cors.used[i] = false;
+			--vm->cors.extant;
+			assert(vm->cors.extant >= 0);
+			freedCors++;
+		}
+	}
+	fprintf(stderr, "GC freed %d maps %d vecs %d cors\n", freedMaps, freedVecs, freedCors);
 }
 
 static vec_t* vec_allot(rela_vm* vm) {
@@ -451,8 +475,46 @@ static vec_t* vec_allot(rela_vm* vm) {
 	return NULL;
 }
 
+static map_t* map_allot(rela_vm* vm) {
+	for (int tries = 0, i = vm->maps.next; tries < 2; tries++, i = 0) {
+		while (i < sizeof(vm->maps.cells)/sizeof(map_t)) {
+			if (!vm->maps.used[i]) {
+				vm->maps.used[i] = true;
+				map_t* map = &vm->maps.cells[i];
+				memset(map, 0, sizeof(map_t));
+				vm->maps.next = i+1;
+				vm->maps.extant++;
+				return map;
+			}
+			i++;
+		}
+		gc(vm);
+	}
+	ensure(vm, false, "map_allot() out of memory");
+	return NULL;
+}
+
+static cor_t* cor_allot(rela_vm* vm) {
+	for (int tries = 0, i = vm->cors.next; tries < 2; tries++, i = 0) {
+		while (i < sizeof(vm->cors.cells)/sizeof(cor_t)) {
+			if (!vm->cors.used[i]) {
+				vm->cors.used[i] = true;
+				cor_t* cor = &vm->cors.cells[i];
+				memset(cor, 0, sizeof(cor_t));
+				vm->cors.next = i+1;
+				vm->cors.extant++;
+				return cor;
+			}
+			i++;
+		}
+		gc(vm);
+	}
+	ensure(vm, false, "cor_allot() out of memory");
+	return NULL;
+}
+
 static size_t vec_size(rela_vm* vm, vec_t* vec) {
-	return vec->count;
+	return vec ? vec->count: 0;
 }
 
 static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
@@ -488,6 +550,11 @@ static void vec_del(rela_vm* vm, vec_t* vec, int index) {
 
 static void vec_push(rela_vm* vm, vec_t* vec, item_t item) {
 	vec_ins(vm, vec, vec->count)[0] = item;
+}
+
+static void vec_push_allot(rela_vm* vm, vec_t** vec, item_t item) {
+	if (!*vec) *vec = vec_allot(vm);
+	vec_ins(vm, *vec, (*vec)->count)[0] = item;
 }
 
 static item_t vec_pop(rela_vm* vm, vec_t* vec) {
@@ -561,25 +628,6 @@ static void vec_sort(rela_vm* vm, vec_t* vec, int low, int high) {
 
 static void vec_clear(rela_vm* vm, vec_t* vec) {
 	vec->count = 0;
-}
-
-static map_t* map_allot(rela_vm* vm) {
-	for (int tries = 0, i = vm->maps.next; tries < 2; tries++, i = 0) {
-		while (i < sizeof(vm->maps.cells)/sizeof(map_t)) {
-			if (!vm->maps.used[i]) {
-				vm->maps.used[i] = true;
-				map_t* map = &vm->maps.cells[i];
-				memset(map, 0, sizeof(map_t));
-				vm->maps.next = i+1;
-				vm->maps.extant++;
-				return map;
-			}
-			i++;
-		}
-		gc(vm);
-	}
-	ensure(vm, false, "map_allot() out of memory");
-	return NULL;
 }
 
 static int map_lower_bound(rela_vm* vm, map_t* map, item_t key) {
@@ -733,11 +781,9 @@ static int str_scan(const char *source, strcb cb) {
 
 static void reset(rela_vm* vm) {
 	vm->scope_global = NULL;
+	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
 
 	gc(vm);
-
-	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
-	region_truncate(&vm->general);
 
 	region_truncate(&vm->strings.region);
 	assert(vm->strings.region.depth == vm->strings.region.start);
@@ -872,10 +918,6 @@ static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 
 	assert(tmp[0]);
 	return tmp;
-}
-
-static cor_t* cor_allot(rela_vm* vm) {
-	return allot(vm, sizeof(cor_t));
 }
 
 static code_t* compiled(rela_vm* vm, int offset) {
@@ -1045,7 +1087,9 @@ static int peek(const char *source, char *name) {
 }
 
 static node_t* node_allot(rela_vm* vm) {
-	return region_allot(&vm->prepare, sizeof(node_t));
+	vm->nodes.cells = realloc(vm->nodes.cells, (vm->nodes.depth+1)*sizeof(node_t*));
+	vm->nodes.cells[vm->nodes.depth] = calloc(sizeof(node_t),1);
+	return vm->nodes.cells[vm->nodes.depth++];
 }
 
 static int parse_block(rela_vm* vm, const char *source, node_t *node) {
@@ -1065,7 +1109,7 @@ static int parse_block(rela_vm* vm, const char *source, node_t *node) {
 		}
 
 		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
-		vec_push(vm, &node->vals, pop(vm));
+		vec_push_allot(vm, &node->vals, pop(vm));
 	}
 
 	ensure(vm, found_end, "expected keyword 'end': %s", &source[offset]);
@@ -1097,7 +1141,7 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 		}
 
 		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
-		vec_push(vm, &node->vals, pop(vm));
+		vec_push_allot(vm, &node->vals, pop(vm));
 	}
 
 	if (found_else) {
@@ -1114,17 +1158,17 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 			}
 
 			offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
-			vec_push(vm, &node->keys, pop(vm));
+			vec_push_allot(vm, &node->keys, pop(vm));
 		}
 	}
 
 	ensure(vm, found_else || found_end, "expected keyword 'else' or 'end': %s", &source[offset]);
 
-	if (vec_size(vm, &node->vals))
-		vec_cell(vm, &node->vals, vec_size(vm, &node->vals)-1)->node->results = 1;
+	if (vec_size(vm, node->vals))
+		vec_cell(vm, node->vals, vec_size(vm, node->vals)-1)->node->results = 1;
 
-	if (vec_size(vm, &node->keys))
-		vec_cell(vm, &node->keys, vec_size(vm, &node->keys)-1)->node->results = 1;
+	if (vec_size(vm, node->keys))
+		vec_cell(vm, node->keys, vec_size(vm, node->keys)-1)->node->results = 1;
 
 	return offset;
 }
@@ -1236,14 +1280,14 @@ static int parse_node(rela_vm* vm, const char *source) {
 				ensure(vm, isnamefirst(source[offset]), "expected variable: %s", &source[offset]);
 
 				length = str_skip(&source[offset], isname);
-				vec_push(vm, &node->keys, string(vm, substr(vm, &source[offset], 0, length)));
+				vec_push_allot(vm, &node->keys, string(vm, substr(vm, &source[offset], 0, length)));
 				offset += length;
 
 				offset += skip_gap(&source[offset]);
 				if (source[offset] == ',') {
 					offset++;
 					length = str_skip(&source[offset], isname);
-					vec_push(vm, &node->keys, string(vm, substr(vm, &source[offset], 0, length)));
+					vec_push_allot(vm, &node->keys, string(vm, substr(vm, &source[offset], 0, length)));
 					offset += length;
 				}
 
@@ -1306,7 +1350,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 						node_t *param = node_allot(vm);
 						param->type = NODE_NAME;
 						param->item = string(vm, substr(vm, &source[offset], 0, length));
-						vec_push(vm, &node->keys, (item_t){.type = NODE, .node = param});
+						vec_push_allot(vm, &node->keys, (item_t){.type = NODE, .node = param});
 
 						offset += length;
 					}
@@ -1409,7 +1453,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				continue;
 			}
 			offset += parse_node(vm, &source[offset]);
-			vec_push(vm, &node->vals, pop(vm));
+			vec_push_allot(vm, &node->vals, pop(vm));
 		}
 		ensure(vm, source[offset] == ']', "expected closing bracket: %s", &source[offset]);
 		offset++;
@@ -1433,9 +1477,9 @@ static int parse_node(rela_vm* vm, const char *source) {
 			const char* left = &source[offset];
 			offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_UNGREEDY);
 			item_t pair = pop(vm);
-			ensure(vm, pair.node->type == NODE_MULTI && vec_size(vm, &pair.node->keys) == 1 && vec_size(vm, &pair.node->vals) == 1,
+			ensure(vm, pair.node->type == NODE_MULTI && vec_size(vm, pair.node->keys) == 1 && vec_size(vm, pair.node->vals) == 1,
 				"expected key/val pair: %s", left);
-			vec_push(vm, &node->vals, pair);
+			vec_push_allot(vm, &node->vals, pair);
 		}
 		ensure(vm, source[offset] == '}', "expected closing brace: %s", &source[offset]);
 		offset++;
@@ -1563,7 +1607,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 				result->opcode = consume->opcode;
 				ensure(vm, argument >= consume->argc, "operator %s insufficient arguments", consume->name);
 				for (int j = consume->argc; j > 0; --j) {
-					vec_push(vm, &result->vals, (item_t){.type = NODE, .node = arguments[argument-j]});
+					vec_push_allot(vm, &result->vals, (item_t){.type = NODE, .node = arguments[argument-j]});
 				}
 				argument -= consume->argc;
 				arguments[argument++] = result;
@@ -1579,25 +1623,25 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 			result->opcode = consume->opcode;
 			ensure(vm, argument >= consume->argc, "operator %s insufficient arguments", consume->name);
 			for (int j = consume->argc; j > 0; --j) {
-				vec_push(vm, &result->vals, (item_t){.type = NODE, .node = arguments[argument-j]});
+				vec_push_allot(vm, &result->vals, (item_t){.type = NODE, .node = arguments[argument-j]});
 			}
 			argument -= consume->argc;
 			arguments[argument++] = result;
 		}
 
 		ensure(vm, !operation && argument == 1, "unbalanced expression");
-		vec_push(vm, &node->vals, (item_t){.type = NODE, .node = arguments[0]});
+		vec_push_allot(vm, &node->vals, (item_t){.type = NODE, .node = arguments[0]});
 
 		offset += skip_gap(&source[offset]);
 
 		if (source[offset] == '=') {
-			ensure(vm, vec_size(vm, &node->vals) > 0, "missing assignment name: %s", &source[offset]);
+			ensure(vm, vec_size(vm, node->vals) > 0, "missing assignment name: %s", &source[offset]);
 
 			offset++;
-			for (int i = 0; i < vec_size(vm, &node->vals); i++)
-				vec_push(vm, &node->keys, vec_get(vm, &node->vals, i));
+			for (int i = 0; i < vec_size(vm, node->vals); i++)
+				vec_push_allot(vm, &node->keys, vec_get(vm, node->vals, i));
 
-			vec_clear(vm, &node->vals);
+			vec_clear(vm, node->vals);
 			continue;
 		}
 
@@ -1609,7 +1653,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 		break;
 	}
 
-	ensure(vm, vec_size(vm, &node->vals) > 0, "missing assignment value: %s", &source[offset]);
+	ensure(vm, vec_size(vm, node->vals) > 0, "missing assignment value: %s", &source[offset]);
 
 	push(vm, (item_t){.type = NODE, .node = node});
 	return offset;
@@ -1627,18 +1671,18 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	// this is the entry point for most non-control non-opcode statements
 	if (node->type == NODE_MULTI) {
 		assert(!node->args);
-		assert(vec_size(vm, &node->vals));
+		assert(vec_size(vm, node->vals));
 
 		// stack frame
 		compile(vm, OP_MARK, nil(vm));
 
 		// stream the values onto the stack
-		for (int i = 0; i < vec_size(vm, &node->vals); i++)
-			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 		// OP_SET|OP_ASSIGN index values from the start of the current stack frame
-		for (int i = 0; i < vec_size(vm, &node->keys); i++) {
-			node_t* subnode = vec_get(vm, &node->keys, i).node;
+		for (int i = 0; i < vec_size(vm, node->keys); i++) {
+			node_t* subnode = vec_get(vm, node->keys, i).node;
 			process(vm, subnode, PROCESS_ASSIGN, i);
 		}
 
@@ -1647,7 +1691,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	}
 	else
 	if (node->type == NODE_NAME) {
-		assert(!vec_size(vm, &node->keys) && !vec_size(vm, &node->vals));
+		assert(!vec_size(vm, node->keys) && !vec_size(vm, node->vals));
 
 		// function or function-like opcode call
 		if (node->call) {
@@ -1752,13 +1796,13 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			compile(vm, OP_PID, integer(vm, node->fpath.ids[i]));
 		}
 
-		for (int i = 0; i < vec_size(vm, &node->keys); i++)
-			process(vm, vec_get(vm, &node->keys, i).node, PROCESS_ASSIGN, i);
+		for (int i = 0; i < vec_size(vm, node->keys); i++)
+			process(vm, vec_get(vm, node->keys, i).node, PROCESS_ASSIGN, i);
 
 		compile(vm, OP_CLEAN, nil(vm));
 
-		for (int i = 0; i < vec_size(vm, &node->vals); i++)
-			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 		// if an explicit return expression is used, these instructions
 		// will be dead code
@@ -1782,14 +1826,14 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			compile(vm, OP_SHIFT, nil(vm));
 
 		if (node->opcode == OP_AND || node->opcode == OP_OR) {
-			process(vm, vec_get(vm, &node->vals, 0).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, 0).node, 0, 0);
 			int jump = compile(vm, node->opcode, nil(vm));
-			process(vm, vec_get(vm, &node->vals, 1).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, 1).node, 0, 0);
 			compiled(vm, jump)->item = integer(vm, vm->code.depth);
 		}
 		else {
-			for (int i = 0; i < vec_size(vm, &node->vals); i++)
-				process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+			for (int i = 0; i < vec_size(vm, node->vals); i++)
+				process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 			compile(vm, node->opcode, nil(vm));
 		}
@@ -1805,7 +1849,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	else
 	// string or number literal, optionally part of array chain a[b]["c"]
 	if (node->type == NODE_LITERAL) {
-		assert(!node->args && !vec_size(vm, &node->keys) && !vec_size(vm, &node->vals));
+		assert(!node->args && !vec_size(vm, node->keys) && !vec_size(vm, node->vals));
 
 		char *dollar = node->item.type == STRING ? strchr(node->item.str, '$'): NULL;
 
@@ -1881,7 +1925,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	else
 	// a built-in function-like keyword with arguments
 	if (node->type == NODE_BUILTIN) {
-		assert(!vec_size(vm, &node->keys) && !vec_size(vm, &node->vals));
+		assert(!vec_size(vm, node->keys) && !vec_size(vm, node->vals));
 
 		compile(vm, OP_MARK, nil(vm));
 
@@ -1897,7 +1941,6 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	// if expression ... [else ...] end
 	// (returns a value for ternary style assignment)
 	if (node->type == NODE_IF) {
-		assert(&node->vals);
 
 		// conditions
 		if (node->args)
@@ -1908,19 +1951,19 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_DROP, nil(vm));
 
 		// success block
-		for (int i = 0; i < vec_size(vm, &node->vals); i++)
-			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 		// optional failure block
-		if (vec_size(vm, &node->keys)) {
+		if (vec_size(vm, node->keys)) {
 			// jump success path past failure block
 			int jump2 = compile(vm, OP_JMP, nil(vm));
 			compiled(vm, jump)->item = integer(vm, vm->code.depth);
 			compile(vm, OP_DROP, nil(vm));
 
 			// failure block
-			for (int i = 0; i < vec_size(vm, &node->keys); i++)
-				process(vm, vec_get(vm, &node->keys, i).node, 0, 0);
+			for (int i = 0; i < vec_size(vm, node->keys); i++)
+				process(vm, vec_get(vm, node->keys, i).node, 0, 0);
 
 			compiled(vm, jump2)->item = integer(vm, vm->code.depth);
 		}
@@ -1933,7 +1976,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	else
 	// while expression ... end
 	if (node->type == NODE_WHILE) {
-		assert(&node->vals);
+		assert(node->vals);
 
 		compile(vm, OP_MARK, nil(vm));
 		int loop = compile(vm, OP_LOOP, nil(vm));
@@ -1948,8 +1991,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_DROP, nil(vm));
 
 		// do ... end
-		for (int i = 0; i < vec_size(vm, &node->vals); i++)
-			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
@@ -1978,18 +2021,16 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		int begin = vm->code.depth;
 
 		// OP_FOR expects a vector with key[,val] variable names
-		// but node freed after compilation so can't &node->keys
-		vec_t* vec = vec_allot(vm);
-		*vec = node->keys;
-		compile(vm, OP_FOR, (item_t){.type = VECTOR, .vec = vec});
+		if (!node->keys) node->keys = vec_allot(vm);
+		compile(vm, OP_FOR, (item_t){.type = VECTOR, .vec = node->keys});
 
 		// block
-		for (int i = 0; i < vec_size(vm, &node->vals); i++)
-			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
-		vec_push(vm, vec, integer(vm, vm->code.depth));
+		vec_push_allot(vm, &node->keys, integer(vm, vm->code.depth));
 		compiled(vm, loop)->item = integer(vm, vm->code.depth);
 		compile(vm, OP_UNLOOP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 0));
@@ -2017,8 +2058,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		if (node->args)
 			process(vm, node->args, 0, 0);
 
-		for (int i = 0; i < vec_size(vm, &node->vals); i++)
-			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 		compile(vm, OP_VECTOR, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 1));
@@ -2032,8 +2073,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		if (node->args)
 			process(vm, node->args, 0, 0);
 
-		for (int i = 0; i < vec_size(vm, &node->vals); i++)
-			process(vm, vec_get(vm, &node->vals, i).node, 0, 0);
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
 		compile(vm, OP_UNMAP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 1));
@@ -2188,8 +2229,10 @@ static void op_global(rela_vm* vm) {
 
 static void call(rela_vm* vm, item_t item) {
 	if (item.type == CALLBACK) {
-		item.cb((rela_vm*)vm);
 		if (memory_pressure(vm) > 0.9) gc(vm);
+		vm->allow_gc = false;
+		item.cb((rela_vm*)vm);
+		vm->allow_gc = true;
 		return;
 	}
 
@@ -2407,7 +2450,7 @@ static bool find(rela_vm* vm, item_t key, item_t* val) {
 	}
 
 	if (map_get(vm, vm->scope_global, key, val)) return true;
-	if (map_get(vm, &vm->scope_core, key, val)) return true;
+	if (map_get(vm, vm->scope_core, key, val)) return true;
 
 	return false;
 }
@@ -2720,7 +2763,7 @@ static void op_slurp(rela_vm* vm) {
 
 		if (file) {
 			size_t bytes = st.st_size;
-			void *ptr = allot(vm, bytes + 1);
+			void *ptr = malloc(bytes + 1);
 
 			size_t read = 0;
 			for (int i = 0; i < 3; i++) {
@@ -2733,6 +2776,7 @@ static void op_slurp(rela_vm* vm) {
 
 			pop(vm);
 			push(vm, string(vm, ptr));
+			free(ptr);
 		}
 		fclose(file);
 	}
@@ -2905,13 +2949,13 @@ static void destroy(rela_vm* vm) {
 		return;
 	}
 
-	vm->general.start = 0;
+	vm->code.depth = 0;
 	vm->strings.start = 0;
 	vm->strings.region.start = 0;
+	vm->scope_core = NULL;
 	reset(vm);
 	free(vm->code.cells);
-	free(vm->general.cells);
-	free(vm->prepare.cells);
+	free(vm->routines.items);
 	free(vm->strings.cells);
 	free(vm->strings.region.cells);
 	free(vm);
@@ -2921,8 +2965,10 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
 	if (!vm) exit(1);
 
+	vm->allow_gc = true;
 	vm->custom = custom;
 	vm->memory_limit = memory;
+	vm->scope_core = map_allot(vm);
 
 	if (setjmp(vm->jmp)) {
 		fprintf(stderr, "%s\n", vm->err);
@@ -2930,7 +2976,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 		return NULL;
 	}
 
-	map_set(vm, &vm->scope_core, string(vm, "print"), (item_t){.type = SUBROUTINE, .sub = vm->code.depth});
+	map_set(vm, vm->scope_core, string(vm, "print"), (item_t){.type = SUBROUTINE, .sub = vm->code.depth});
 	compile(vm, OP_PRINT, nil(vm));
 	compile(vm, OP_RETURN, nil(vm));
 
@@ -2938,7 +2984,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 
 	for (int i = 0; i < registrations; i++) {
 		const rela_register* reg = &registry[i];
-		map_set(vm, &vm->scope_core,
+		map_set(vm, vm->scope_core,
 			string(vm, (char*)reg->name),
 			(item_t){.type = CALLBACK, .cb = reg->func}
 		);
@@ -2958,12 +3004,15 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	op_unmark(vm);
 	vec_pop(vm, &vm->routines);
 
-	vm->general.start = vm->general.depth;
 	vm->strings.start = vm->strings.depth;
 	vm->strings.region.start = vm->strings.region.depth;
-	region_truncate(&vm->prepare);
-	gc_keep_extant(vm);
 
+	while (vm->nodes.cells && vm->nodes.depth > 0)
+		free(vm->nodes.cells[--vm->nodes.depth]);
+	free(vm->nodes.cells);
+	vm->nodes.cells = NULL;
+
+	gc(vm);
 	return vm;
 }
 
@@ -2986,10 +3035,6 @@ void rela_destroy(rela_vm* vm) {
 void rela_decompile(rela_vm* vm) {
 	for (int i = 0, l = vm->code.depth; i < l; i++)
 		decompile(vm, &vm->code.cells[i]);
-}
-
-void* rela_allot(rela_vm* vm, size_t bytes) {
-	return allot(vm, bytes);
 }
 
 size_t rela_depth(rela_vm* vm) {
