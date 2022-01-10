@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
-	rela_vm* rela = rela_create(source, 1024*1024, NULL, sizeof(registry) / sizeof(rela_register), registry);
+	rela_vm* rela = rela_create(source, NULL, sizeof(registry) / sizeof(rela_register), registry);
 
 	if (!rela) exit(1);
 	if (decompile) rela_decompile(rela);

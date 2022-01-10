@@ -45,7 +45,6 @@ typedef struct {
 // Create a Rela VM, install callbacks and compile source code
 rela_vm* rela_create(
 	const char* source,
-	size_t memory,
 	void* custom,
 	size_t registrations,
 	const rela_register* registry
@@ -61,6 +60,7 @@ int rela_run(rela_vm* rela);
 void* rela_custom(rela_vm* rela);
 void rela_destroy(rela_vm* rela);
 void rela_decompile(rela_vm* rela);
+void rela_collect(rela_vm* rela);
 
 // Number of stack items supplied to a callback
 size_t rela_depth(rela_vm* rela);

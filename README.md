@@ -9,14 +9,29 @@ Rela is a scripting language designed to:
 * Provide only an unmanaged USERDATA pointer type (like Lua light user data)
 * Not provide persistent global state across script executions
 
-No persistent state means a VM starts from a clean slate every time it is
-called, executing its compiled bytecode from the start each time and releasing
-all runtime memory at the end. If saving state is required it needs to be
-handled by registering custom callbacks. This moves the problem of managing
-state onto the application and keeps the VM simple and predictable.
-Examples for handling state:
+## No persistent state
 
-* Callback to query current app state each execution
-* Callbacks to read and write maps as records in SQLite
-* Callbacks to serialize/unserialize custom data
-* Callbacks to use the built-in USERDATA type
+No persistent state means a Rela VM runs on a clean run-time state every time
+it is called, executing the compiled bytecode from the beginning and releasing
+all working memory at the end. If saving state is required that needs to be
+handled by registering custom callbacks. This moves the problem of managing
+state onto the host application and keeps Rela simple and predictable.
+
+## Memory management
+
+https://en.wikipedia.org/wiki/Region-based_memory_management
+
+Executing a script allocates memory across several internal regions, which is
+cheap, fast and means internal objects can be removed from the stack and used
+by callbacks without risk of untimely garbage collection.
+
+There is a small mark-and-sweep garbage collector but the VM guarantees never
+to implicitly trigger a stop-the-world collection during execution.
+
+Instead, memory reclaimation only occurs when:
+
+* rela_create() completes and compile-time memory is reset
+* rela_run() completes and the run-time memory is reset
+* A callback explicitly calls rela_collect()
+* A script explicitly calls collect()
+
