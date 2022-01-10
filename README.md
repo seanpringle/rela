@@ -49,9 +49,9 @@ bool run(const char* source) {
 
 https://en.wikipedia.org/wiki/Region-based_memory_management
 
-Executing a script allocates memory from several internal regions which is cheap,
-fast and means internal objects can be removed from the stack and used by callbacks
-without risk of untimely garbage collection.
+Executing a script allocates memory from regions which is cheap, fast and means
+internal objects can be removed from the stack and used by callbacks without
+risk of untimely garbage collection.
 
 There is a simple mark-and-sweep stop-the-world garbage collector that the VM
 guarantees never to implicitly trigger during execution. Instead, memory
