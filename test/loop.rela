@@ -3,21 +3,21 @@ sum = 0
 for i in 10
 	sum = sum+i
 end
-assert(sum == 45)
+lib.assert(sum == 45)
 
 sum = 0
 vec = [1,2,3]
 for v in vec
 	sum = sum+v
 end
-assert(sum == 6)
+lib.assert(sum == 6)
 
 sum = 0
 vec = [1,2,3]
 for k,v in vec
 	sum = sum+k
 end
-assert(sum == 3)
+lib.assert(sum == 3)
 
 sum = 0
 keys = ""
@@ -26,19 +26,19 @@ for k,v in map
 	sum = sum+v
 	keys = "$keys$k"
 end
-assert(sum == 45)
-assert(keys == "abc")
+lib.assert(sum == 45)
+lib.assert(keys == "abc")
 
 i = 10
 while i > 0
 	i = i-1
 	if i == 5 continue end
-	assert(i != 5)
+	lib.assert(i != 5)
 end
 
 i = 10
 while i > 0
 	i = i-1
 	if i == 5 break end
-	assert(i >= 5)
+	lib.assert(i >= 5)
 end

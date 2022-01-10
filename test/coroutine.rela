@@ -3,13 +3,13 @@ function alpha()
 	n = 0
 	while true
 		n = n+1
-		yield(n)
+		lib.yield(n)
 	end
 end
 
-beta = coroutine(alpha)
+beta = lib.coroutine(alpha)
 
-assert(resume(beta) == 1)
-assert(resume(beta) == 2)
-assert(resume(beta) == 3)
+lib.assert(lib.resume(beta) == 1)
+lib.assert(lib.resume(beta) == 2)
+lib.assert(lib.resume(beta) == 3)
 

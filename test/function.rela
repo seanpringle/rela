@@ -1,13 +1,13 @@
 
 function abc(a)
 	b=2
-	assert(a == 1)
-	assert(b == 2)
+	lib.assert(a == 1)
+	lib.assert(b == 2)
 end
 
 abc(1)
-assert(global.a == nil)
-assert(global.b == nil)
+lib.assert(global.a == nil)
+lib.assert(global.b == nil)
 
 function outer()
 	function inner()
@@ -19,11 +19,11 @@ function outer()
 		end
 		return inner3()+1
 	end
-	assert(inner)
-	assert(inner() == 1)
-	assert(inner2() == 3)
+	lib.assert(inner)
+	lib.assert(inner() == 1)
+	lib.assert(inner2() == 3)
 end
 
-assert(global.inner == nil)
+lib.assert(global.inner == nil)
 
 outer()

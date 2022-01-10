@@ -1,5 +1,12 @@
 
-assert(1 + 0.1 == 1)
-assert(1.01 + 1 == 2.01)
+lib.assert(1 + 0.1 == 1)
+lib.assert(1.01 + 1 == 2.01)
 
-assert(2*(3+2) == 10)
+lib.assert(2*(3+2) == 10)
+
+lib.assert(lib.abs(-3) == 3)
+lib.assert(lib.ceil(0.1) == 1.0)
+
+lib.assert(lib.min(3,2,4) == 2)
+lib.assert(lib.max(3.0,2.1,4.0) == 4.0)
+

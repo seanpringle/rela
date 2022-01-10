@@ -8,6 +8,7 @@ Rela is a scripting language designed to:
 * Use regional memory management without ref-counting, cycles or GC pauses
 * Provide only an unmanaged USERDATA pointer type (like Lua light user data)
 * Not provide persistent global state across script executions
+* Use PCRE regex syntax
 
 ## No persistent state
 
@@ -33,5 +34,39 @@ Instead, memory reclaimation only occurs when:
 * rela_create() completes and compile-time memory is reset
 * rela_run() completes and the run-time memory is reset
 * A callback explicitly calls rela_collect()
-* A script explicitly calls collect()
+* A script explicitly calls lib.collect()
+
+# Keywords
+
+```
+if else end while for break continue return function nil true false and or
+global lib
+```
+
+`print` is available by default and can be redirected by callback.
+
+# Operators
+
+```
+and or == != >= > <= < ~ + - * / %
+```
+
+# Standard library
+
+The `lib` namespace holds everything else:
+
+```
+assert collect coroutine resume yield sort type sin cos tan asin acos atan sinh
+cosh tanh ceil floor sqrt abs atan2 log log10 pow min max
+```
+
+# PCRE
+
+The match operator `~` is available if Rela is built with PCRE, returning the
+full match and any groups:
+
+```
+> print("abc" ~ "(ab)(c)")
+abc     ab      c
+```
 

@@ -1,16 +1,16 @@
 
-assert(1 == 1)
-assert(1 != 2)
-assert(1 < 2)
-assert(1 <= 2)
-assert(2 > 1)
-assert(2 >= 1)
+lib.assert(1 == 1)
+lib.assert(1 != 2)
+lib.assert(1 < 2)
+lib.assert(1 <= 2)
+lib.assert(2 > 1)
+lib.assert(2 >= 1)
 
-assert(0.3 < 0.4)
-assert(0.4 != 0.3)
-assert(0.3 == 0.3)
-assert(0.4 > 0.3)
+lib.assert(0.3 < 0.4)
+lib.assert(0.4 != 0.3)
+lib.assert(0.3 == 0.3)
+lib.assert(0.4 > 0.3)
 
-assert(0-1 == 0-1)
+lib.assert(0-1 == 0-1)
 
-assert(!0)
+lib.assert(!0)

@@ -1,32 +1,32 @@
 
 stuff = [ 1, [ { a = 3 } ] ]
 
-assert(stuff[1][0].a == 3)
-assert(stuff[1][0].b == nil)
+lib.assert(stuff[1][0].a == 3)
+lib.assert(stuff[1][0].b == nil)
 
 function def(n)
 	return "xyz"
 end
 
-assert(global.def(1) == "xyz")
-assert(global.def() == "xyz")
+lib.assert(global.def(1) == "xyz")
+lib.assert(global.def() == "xyz")
 
-assert(global[def(1)] == nil)
-assert(global[def(1,2)] == nil)
+lib.assert(global[def(1)] == nil)
+lib.assert(global[def(1,2)] == nil)
 
 function ghi()
 	return "def"
 end
 
-assert(global[ghi()](1) == "xyz")
+lib.assert(global[ghi()](1) == "xyz")
 
 global.jkl = "tuv"
-assert(global.jkl == "tuv")
-assert(global["jkl"] == "tuv")
+lib.assert(global.jkl == "tuv")
+lib.assert(global["jkl"] == "tuv")
 
 function mno()
 	return "jkl"
 end
 
-assert(global[mno()] == "tuv")
+lib.assert(global[mno()] == "tuv")
 

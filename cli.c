@@ -21,8 +21,9 @@
 // SOFTWARE.
 
 #include "rela.h"
-#include "stdio.h"
-#include "string.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
 
 void hello(rela_vm* rela) {
 	rela_push(rela, rela_make_string(rela, "hello world"));
@@ -34,19 +35,44 @@ rela_register registry[] = {
 
 int main(int argc, char* argv[]) {
 	bool decompile = false;
-	const char* source = NULL;
+	const char* script = NULL;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "-d")) { decompile = true; continue; }
-		source = argv[i];
+		script = argv[i];
+	}
+
+	if (!script) {
+		fprintf(stderr, "missing script file");
+		exit(1);
+	}
+
+	char* source = NULL;
+
+	struct stat st;
+	if (stat(script, &st) == 0) {
+		FILE *file = fopen(script, "r");
+		if (file) {
+			size_t bytes = st.st_size;
+			source = malloc(bytes + 1);
+			size_t read = fread(source, 1, bytes, file);
+			source[bytes] = 0;
+			if (read != bytes) {
+				free(source);
+				source = NULL;
+			}
+		}
+		fclose(file);
 	}
 
 	if (!source) {
-		fprintf(stderr, "missing source file");
+		fprintf(stderr, "cannot read script file");
 		exit(1);
 	}
 
 	rela_vm* rela = rela_create(source, NULL, sizeof(registry) / sizeof(rela_register), registry);
+
+	free(source);
 
 	if (!rela) exit(1);
 	if (decompile) rela_decompile(rela);

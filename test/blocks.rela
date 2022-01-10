@@ -1,16 +1,16 @@
 
 if false
-	assert(0)
+	lib.assert(0)
 end
 
 if true
-	assert(1)
+	lib.assert(1)
 else
-	assert(0)
+	lib.assert(0)
 end
 
 if false
 else if true
 else
-	assert(0)
+	lib.assert(0)
 end

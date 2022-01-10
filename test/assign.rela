@@ -2,10 +2,10 @@
 a = 1
 b = 2
 
-assert(a == 1)
-assert(b == 2)
+lib.assert(a == 1)
+lib.assert(b == 2)
 
 a, b, c = 2, 3, 4
 
-assert(b == 3)
-assert(c == 4)
+lib.assert(b == 3)
+lib.assert(c == 4)

@@ -1,4 +1,4 @@
 
-assert(hello)
-assert("hello world" == hello())
-assert(hello() == "hello world")
+lib.assert(hello)
+lib.assert("hello world" == hello())
+lib.assert(hello() == "hello world")
