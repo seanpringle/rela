@@ -195,6 +195,12 @@ modifier_t modifiers[] = {
 	{ .name = "!", .opcode = OP_NOT   },
 };
 
+typedef struct {
+	char** cells;
+	bool* mark;
+	int depth;
+} string_region_t;
+
 typedef struct _rela_vm {
 	// routines[0] == main coroutine, always set
 	// routines[1...n] resume/yield chain
@@ -205,6 +211,7 @@ typedef struct _rela_vm {
 
 	size_t memory_limit;
 	bool allow_gc;
+	bool allow_gc_str;
 
 	struct {
 		node_t** cells;
@@ -212,17 +219,17 @@ typedef struct _rela_vm {
 	} nodes;
 
 	struct {
-		map_t cells[100];
-		bool used[100];
-		bool mark[100];
+		map_t cells[1000];
+		bool used[1000];
+		bool mark[1000];
 		int next;
 		int extant;
 	} maps;
 
 	struct {
-		vec_t cells[1000];
-		bool used[1000];
-		bool mark[1000];
+		vec_t cells[10000];
+		bool used[10000];
+		bool mark[10000];
 		int next;
 		int extant;
 	} vecs;
@@ -243,11 +250,8 @@ typedef struct _rela_vm {
 	} code;
 
 	// interned strings
-	struct {
-		char** cells;
-		bool* mark;
-		int depth;
-	} strings;
+	string_region_t stringsA;
+	string_region_t stringsB;
 
 	// compile-time scope tree
 	struct {
@@ -299,10 +303,11 @@ static int parse_node(rela_vm* vm, const char *source);
 static float memory_pressure(rela_vm* vm) {
 	float vecs = (float)vm->vecs.extant / (float)(sizeof(vm->vecs.cells)/sizeof(vec_t));
 	float maps = (float)vm->maps.extant / (float)(sizeof(vm->maps.cells)/sizeof(map_t));
-	return vecs > maps ? vecs: maps;
+	float cors = (float)vm->cors.extant / (float)(sizeof(vm->cors.cells)/sizeof(cor_t));
+	return vecs > maps ? vecs: (maps > cors ? maps: cors);
 }
 
-static int str_lower_bound(rela_vm* vm, const char *str);
+static int str_lower_bound(rela_vm* vm, string_region_t* region, const char *str);
 static size_t vec_size(rela_vm* vm, vec_t* vec);
 static item_t vec_get(rela_vm* vm, vec_t* vec, int i);
 static void gc_mark_vec(rela_vm* vm, vec_t* vec);
@@ -318,10 +323,10 @@ static void gc_mark_item(rela_vm* vm, item_t item) {
 }
 
 static void gc_mark_str(rela_vm* vm, const char* str) {
-	int index = str_lower_bound(vm, str);
+	int index = str_lower_bound(vm, &vm->stringsA, str);
 
-	if (index < vm->strings.depth && vm->strings.cells[index] == str) {
-		vm->strings.mark[index] = true;
+	if (index < vm->stringsA.depth && vm->stringsA.cells[index] == str) {
+		vm->stringsA.mark[index] = true;
 	}
 }
 
@@ -374,7 +379,7 @@ static void gc(rela_vm* vm) {
 	memset(vm->vecs.mark, 0, sizeof(vm->vecs.mark));
 	memset(vm->maps.mark, 0, sizeof(vm->maps.mark));
 	memset(vm->cors.mark, 0, sizeof(vm->cors.mark));
-	vm->strings.mark = calloc(sizeof(bool),vm->strings.depth);
+	vm->stringsA.mark = calloc(sizeof(bool),vm->stringsA.depth);
 
 	gc_mark_map(vm, vm->scope_core);
 	gc_mark_map(vm, vm->scope_global);
@@ -429,17 +434,17 @@ static void gc(rela_vm* vm) {
 		}
 	}
 	int freedStrs = 0;
-	for (int l = 0, r = 0, d = vm->strings.depth; r < d; ) {
-		if (!vm->strings.mark[r]) {
-			free(vm->strings.cells[r++]);
-			vm->strings.depth--;
+	for (int l = 0, r = 0, d = vm->stringsA.depth; r < d; ) {
+		if (!vm->stringsA.mark[r]) {
+			free(vm->stringsA.cells[r++]);
+			vm->stringsA.depth--;
 			freedStrs++;
 		} else {
-			vm->strings.cells[l++] = vm->strings.cells[r++];
+			vm->stringsA.cells[l++] = vm->stringsA.cells[r++];
 		}
 	}
-	free(vm->strings.mark);
-	vm->strings.mark = NULL;
+	free(vm->stringsA.mark);
+	vm->stringsA.mark = NULL;
 	fprintf(stderr, "GC freed %d maps %d vecs %d cors %d strs\n", freedMaps, freedVecs, freedCors, freedStrs);
 }
 
@@ -659,45 +664,55 @@ static void map_set(rela_vm* vm, map_t* map, item_t key, item_t val) {
 	}
 }
 
-static int str_lower_bound(rela_vm* vm, const char *str) {
+static int str_lower_bound(rela_vm* vm, string_region_t* region, const char *str) {
 	ensure(vm, str, "str_lower_bound() null string");
 	int index = 0;
-	if (vm->strings.depth) {
+	if (region->depth) {
 		int lower = 0;
-		int upper = vm->strings.depth-1;
+		int upper = region->depth-1;
 		while (lower <= upper) {
 			int i = (int)floor((float)(lower + upper) / 2.0f);
-			int c = strcmp(vm->strings.cells[i], str);
+			int c = strcmp(region->cells[i], str);
 			if (c == 0) { index = i; break; }
 			if (c < 0) lower = i+1; else upper = i-1;
 			index = lower;
 		}
 	}
-	assert(index >= 0 && index <= vm->strings.depth);
+	assert(index >= 0 && index <= region->depth);
 	return index;
 }
 
 static const char* strintern(rela_vm* vm, const char* str) {
-	int index = str_lower_bound(vm, str);
+	int indexB = str_lower_bound(vm, &vm->stringsB, str);
 
-	if (index < vm->strings.depth && vm->strings.cells[index] == str) {
+	if (indexB < vm->stringsB.depth && vm->stringsB.cells[indexB] == str) {
 		return str;
 	}
 
-	if (index < vm->strings.depth && strcmp(vm->strings.cells[index], str) == 0) {
-		return vm->strings.cells[index];
+	if (indexB < vm->stringsB.depth && strcmp(vm->stringsB.cells[indexB], str) == 0) {
+		return vm->stringsB.cells[indexB];
+	}
+
+	int index = str_lower_bound(vm, &vm->stringsA, str);
+
+	if (index < vm->stringsA.depth && vm->stringsA.cells[index] == str) {
+		return str;
+	}
+
+	if (index < vm->stringsA.depth && strcmp(vm->stringsA.cells[index], str) == 0) {
+		return vm->stringsA.cells[index];
 	}
 
 	int len = strlen(str);
 	char* cpy = calloc(len+1,1);
 	memmove(cpy, str, len);
 
-	vm->strings.cells = realloc(vm->strings.cells, ++vm->strings.depth * sizeof(char*));
+	vm->stringsA.cells = realloc(vm->stringsA.cells, ++vm->stringsA.depth * sizeof(char*));
 
-	if (index < vm->strings.depth-1) {
-		memmove(&vm->strings.cells[index+1], &vm->strings.cells[index], (vm->strings.depth - index - 1) * sizeof(char*));
+	if (index < vm->stringsA.depth-1) {
+		memmove(&vm->stringsA.cells[index+1], &vm->stringsA.cells[index], (vm->stringsA.depth - index - 1) * sizeof(char*));
 	}
-	vm->strings.cells[index] = cpy;
+	vm->stringsA.cells[index] = cpy;
 	return cpy;
 }
 
@@ -2912,6 +2927,7 @@ static void destroy(rela_vm* vm) {
 		return;
 	}
 
+	vm->allow_gc = true;
 	vm->code.depth = 0;
 	vm->scope_core = NULL;
 	reset(vm);
@@ -2919,8 +2935,10 @@ static void destroy(rela_vm* vm) {
 	free(vm->code.cells);
 	free(vm->routines.items);
 
-	while (vm->strings.depth > 0) free(vm->strings.cells[--vm->strings.depth]);
-	free(vm->strings.cells);
+	while (vm->stringsA.depth > 0) free(vm->stringsA.cells[--vm->stringsA.depth]);
+	while (vm->stringsB.depth > 0) free(vm->stringsB.cells[--vm->stringsB.depth]);
+	free(vm->stringsA.cells);
+	free(vm->stringsB.cells);
 
 	free(vm);
 }
@@ -2929,7 +2947,7 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
 	if (!vm) exit(1);
 
-	vm->allow_gc = true;
+	vm->allow_gc = false;
 	vm->custom = custom;
 	vm->memory_limit = memory;
 	vm->scope_core = map_allot(vm);
@@ -2973,7 +2991,12 @@ static rela_vm* create(const char* src, size_t memory, void* custom, size_t regi
 	free(vm->nodes.cells);
 	vm->nodes.cells = NULL;
 
+	memmove(&vm->stringsB, &vm->stringsA, sizeof(string_region_t));
+	memset(&vm->stringsA, 0, sizeof(string_region_t));
+
+	vm->allow_gc = true;
 	gc(vm);
+
 	return vm;
 }
 
