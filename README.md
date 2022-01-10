@@ -55,7 +55,7 @@ risk of untimely garbage collection.
 
 There is a simple mark-and-sweep stop-the-world garbage collector that the VM
 guarantees never to implicitly trigger during execution. Instead, memory
-reclaimation occurs when:
+reclamation occurs when:
 
 * `rela_create()` completes and compile-time regions are reset
 * `rela_run()` completes and run-time regions are reset
