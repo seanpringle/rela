@@ -38,7 +38,7 @@ reclaimation occurs when:
 * A script explicitly calls `lib.collect()`
 
 The host application can decide which approach is best. The best GC for an
-embedded scripting language is the one you figure out how to avoid using at all.
+embedded scripting language is the one you figure out how to avoid using at all!
 
 ## Keywords
 
