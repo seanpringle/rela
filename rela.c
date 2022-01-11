@@ -1072,6 +1072,11 @@ static int parse_block(rela_vm* vm, const char *source, node_t *node) {
 	int found_end = 0;
 	int offset = skip_gap(source);
 
+	// don't care about this, but Lua habits...
+	if (peek(&source[offset], "do")) {
+		offset += 2;
+	}
+
 	while (source[offset]) {
 		if ((length = skip_gap(&source[offset])) > 0) {
 			offset += length;
@@ -1096,6 +1101,11 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 	int found_else = 0;
 	int found_end = 0;
 	int offset = skip_gap(source);
+
+	// don't care about this, but Lua habits...
+	if (peek(&source[offset], "then")) {
+		offset += 4;
+	}
 
 	while (source[offset]) {
 		if ((length = skip_gap(&source[offset])) > 0) {
@@ -2002,12 +2012,13 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	// literal vector [1,2,3]
 	if (node->type == NODE_VEC) {
 		compile(vm, OP_MARK, nil(vm));
+		assert(!node->args);
 
-		if (node->args)
-			process(vm, node->args, 0, 0);
-
-		for (int i = 0; i < vec_size(vm, node->vals); i++)
+		for (int i = 0; i < vec_size(vm, node->vals); i++) {
+			compile(vm, OP_MARK, nil(vm));
 			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			compile(vm, OP_LIMIT, integer(vm, 1));
+		}
 
 		compile(vm, OP_VECTOR, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 1));
@@ -2017,9 +2028,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 	if (node->type == NODE_MAP) {
 		compile(vm, OP_MARK, nil(vm));
 		compile(vm, OP_MAP, nil(vm));
-
-		if (node->args)
-			process(vm, node->args, 0, 0);
+		assert(!node->args);
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
 			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
