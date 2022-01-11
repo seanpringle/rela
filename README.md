@@ -34,7 +34,7 @@ rela_register registry[] = {
 bool run(const char* source) {
   int ok = false;
 
-  rela_vm* rela = rela_create(source, NULL, 1, registry);
+  rela_vm* rela = rela_create(source, 1, registry, NULL);
 
   if (rela) {
     ok = rela_run(rela) == 0;
