@@ -42,12 +42,25 @@ typedef struct {
 	rela_callback func;
 } rela_register;
 
+typedef struct {
+	const char* name;
+	const char* source;
+} rela_module;
+
 // Create a Rela VM, install callbacks and compile source code
+rela_vm* rela_create_ex(
+	size_t modules,
+	const rela_module* modistry,
+	size_t registrations,
+	const rela_register* registry,
+	void* custom
+);
+
 rela_vm* rela_create(
 	const char* source,
-	void* custom,
 	size_t registrations,
-	const rela_register* registry
+	const rela_register* registry,
+	void* custom
 );
 
 // Opaque type, use functions to access
@@ -56,6 +69,7 @@ typedef struct {
 } rela_item;
 
 // Execute the Rela VM code once then reset all resources
+int rela_run_ex(rela_vm* rela, int modules, int* modlist);
 int rela_run(rela_vm* rela);
 void* rela_custom(rela_vm* rela);
 void rela_destroy(rela_vm* rela);

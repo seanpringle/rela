@@ -35,7 +35,7 @@ rela_register registry[] = {
 };
 
 int run(const char* source, bool decompile) {
-	rela_vm* rela = rela_create(source, NULL, 1, registry);
+	rela_vm* rela = rela_create(source, 1, registry, NULL);
 	if (!rela) return 1;
 
 	int rc = rela_run(rela);

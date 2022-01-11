@@ -43,7 +43,7 @@
 #endif
 
 enum opcode_t {
-	OP_NOP=0, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_MAP, OP_VECTOR,
+	OP_STOP=0, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_MAP, OP_VECTOR,
 	OP_UNMAP, OP_MARK, OP_LIMIT, OP_LOOP, OP_UNLOOP, OP_CLEAN, OP_BREAK, OP_CONTINUE, OP_JMP, OP_JFALSE,
 	OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT, OP_ASSIGN,
 	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
@@ -311,6 +311,11 @@ typedef struct _rela_vm {
 		int start;
 	} code;
 
+	struct {
+		vec_t entries;
+		vec_t names;
+	} modules;
+
 	// interned strings
 	string_region_t stringsA; // young
 	string_region_t stringsB; // old
@@ -431,6 +436,8 @@ static void gc(rela_vm* vm) {
 
 	gc_mark_map(vm, vm->scope_core);
 	gc_mark_map(vm, vm->scope_global);
+	gc_mark_vec(vm, &vm->modules.entries);
+	gc_mark_vec(vm, &vm->modules.names);
 
 	for (int i = 0, l = vec_size(vm, &vm->routines); i < l; i++) {
 		gc_mark_cor(vm, vec_get(vm, &vm->routines, i).cor);
@@ -2062,7 +2069,7 @@ static int64_t literal_int(rela_vm* vm) {
 	return lit.type == INTEGER ? lit.inum: 0;
 }
 
-static void op_nop (rela_vm* vm) {
+static void op_stop (rela_vm* vm) {
 }
 
 static void op_print(rela_vm* vm) {
@@ -2831,7 +2838,7 @@ typedef struct {
 } func_t;
 
 func_t funcs[OPERATIONS] = {
-	[OP_NOP]       = { .name = "nop",       .lib = false, .func = op_nop       },
+	[OP_STOP]      = { .name = "stop",      .lib = false, .func = op_stop      },
 	[OP_PRINT]     = { .name = "print",     .lib = true,  .func = op_print     },
 	[OP_COROUTINE] = { .name = "coroutine", .lib = true,  .func = op_coroutine },
 	[OP_RESUME]    = { .name = "resume",    .lib = true,  .func = op_resume    },
@@ -2924,33 +2931,6 @@ static void decompile(rela_vm* vm, code_t* c) {
 	fflush(stderr);
 }
 
-static int run(rela_vm* vm) {
-	int wtf = setjmp(vm->jmp);
-	if (wtf) {
-		char tmp[STRTMP];
-		fprintf(stderr, "%s (", vm->err);
-		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? routine(vm)->ip: -1);
-		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
-		fprintf(stderr, ")\n");
-		reset(vm);
-		return wtf;
-	}
-
-	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_allot(vm)});
-	routine(vm)->ip = vm->code.start;
-
-	vm->scope_global = map_allot(vm);
-
-	for (;;) {
-		int ip = routine(vm)->ip++;
-		if (ip < 0 || ip >= vm->code.depth) break;
-		funcs[vm->code.cells[ip].op].func(vm);
-	}
-
-	reset(vm);
-	return 0;
-}
-
 static void destroy(rela_vm* vm) {
 	if (setjmp(vm->jmp)) {
 		fprintf(stderr, "%s\n", vm->err);
@@ -2963,6 +2943,8 @@ static void destroy(rela_vm* vm) {
 
 	free(vm->code.cells);
 	free(vm->routines.items);
+	free(vm->modules.entries.items);
+	free(vm->modules.names.items);
 
 	while (vm->stringsA.depth > 0) free(vm->stringsA.cells[--vm->stringsA.depth]);
 	while (vm->stringsB.depth > 0) free(vm->stringsB.cells[--vm->stringsB.depth]);
@@ -2976,7 +2958,14 @@ static void destroy(rela_vm* vm) {
 	free(vm);
 }
 
-static rela_vm* create(const char* src, void* custom, size_t registrations, const rela_register* registry) {
+// Public API
+
+rela_vm* rela_create(const char* src, size_t registrations, const rela_register* registry, void* custom) {
+	rela_module main = (rela_module){.name = "main", .source = src};
+	return rela_create_ex(1, &main, registrations, registry, custom);
+}
+
+rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t registrations, const rela_register* registry, void* custom) {
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
 	if (!vm) exit(1);
 
@@ -3002,7 +2991,7 @@ static rela_vm* create(const char* src, void* custom, size_t registrations, cons
 		map_set(vm, vm->scope_core, string(vm, "lib"), lib);
 	}
 
-	for (int opcode = OP_NOP; opcode < OPERATIONS; opcode++) {
+	for (int opcode = OP_STOP; opcode < OPERATIONS; opcode++) {
 		func_t* fn = &funcs[opcode];
 		ensure(vm, fn->name && fn->func, "%d", opcode);
 		if (!fn->lib) continue;
@@ -3023,8 +3012,15 @@ static rela_vm* create(const char* src, void* custom, size_t registrations, cons
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_allot(vm)});
 	op_mark(vm);
-	source(vm, src);
-	assert(!vec_size(vm, stack(vm)));
+
+	for (int i = 0, l = modules; i < l; i++) {
+		vec_push(vm, &vm->modules.names, string(vm, modistry[i].name));
+		vec_push(vm, &vm->modules.entries, integer(vm, vm->code.depth));
+		source(vm, modistry[i].source);
+		assert(!vec_size(vm, stack(vm)));
+		compile(vm, OP_STOP, nil(0));
+	}
+
 	op_unmark(vm);
 	vec_pop(vm, &vm->routines);
 
@@ -3040,18 +3036,45 @@ static rela_vm* create(const char* src, void* custom, size_t registrations, cons
 	return vm;
 }
 
-// Public API
-
-rela_vm* rela_create(const char* src, void* custom, size_t registrations, const rela_register* registry) {
-	return (rela_vm*) create(src, custom, registrations, registry);
-}
-
 void* rela_custom(rela_vm* vm) {
 	return vm->custom;
 }
 
 int rela_run(rela_vm* vm) {
-	return run(vm);
+	return rela_run_ex(vm, 1, (int[]){0});
+}
+
+int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
+
+	int wtf = setjmp(vm->jmp);
+	if (wtf) {
+		char tmp[STRTMP];
+		fprintf(stderr, "%s (", vm->err);
+		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? routine(vm)->ip: -1);
+		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
+		fprintf(stderr, ")\n");
+		reset(vm);
+		return wtf;
+	}
+
+	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_allot(vm)});
+	vm->scope_global = map_allot(vm);
+
+	for (int mod = 0; mod < modules; mod++) {
+		ensure(vm, modlist[mod] < vec_size(vm, &vm->modules.entries), "invalid module %d", modlist[mod]);
+		routine(vm)->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
+
+		for (;;) {
+			int ip = routine(vm)->ip++;
+			assert(ip >= 0 && ip < vm->code.depth);
+			int opcode = vm->code.cells[ip].op;
+			if (opcode == OP_STOP) break;
+			funcs[opcode].func(vm);
+		}
+	}
+
+	reset(vm);
+	return 0;
 }
 
 void rela_destroy(rela_vm* vm) {
