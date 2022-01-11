@@ -68,7 +68,10 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
-	return run(source, decompile);
+	int rc = run(source, decompile);
+
+	free(source);
+	return rc;
 }
 
 static char* slurp(const char* script) {
