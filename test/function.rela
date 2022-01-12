@@ -9,6 +9,15 @@ abc(1)
 lib.assert(global.a == nil)
 lib.assert(global.b == nil)
 
+function extra()
+	return 1,2
+end
+
+a, b, c = extra()
+lib.assert(a == 1)
+lib.assert(b == 2)
+lib.assert(global.c == nil)
+
 function outer()
 	function inner()
 		return 1

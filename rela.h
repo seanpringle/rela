@@ -109,6 +109,7 @@ rela_item rela_vector_get(rela_vm* vm, rela_item con, int index);
 void rela_vector_set(rela_vm* vm, rela_item con, int index, rela_item val);
 
 rela_item rela_map_get(rela_vm* vm, rela_item con, rela_item key);
+rela_item rela_map_get_named(rela_vm* vm, rela_item con, const char* field);
 rela_item rela_map_key(rela_vm* vm, rela_item con, int index);
 void rela_map_set(rela_vm* vm, rela_item con, rela_item key, rela_item val);
 

@@ -40,7 +40,7 @@ bool run(const char* source) {
     ok = rela_run(rela) == 0;
     rela_destroy(rela);
   }
-	 
+
   return ok;
 }
 ```
@@ -68,7 +68,7 @@ embedded scripting language is the one you figure out how to avoid using at all!
 ## Keywords
 
 ```
-if else end while for break continue return function nil true false and or global lib print
+if else end while for break continue return function nil true false or global lib print
 ```
 
 The `print` keyword can be overriden.

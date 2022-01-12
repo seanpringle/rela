@@ -13,3 +13,14 @@ lib.assert(lib.resume(beta) == 1)
 lib.assert(lib.resume(beta) == 2)
 lib.assert(lib.resume(beta) == 3)
 
+function gamma(n)
+	while true
+		n = lib.yield(n)
+	end
+end
+
+delta = lib.coroutine(gamma, 1)
+
+lib.assert(lib.resume(delta,2) == 2)
+
+

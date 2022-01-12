@@ -45,7 +45,7 @@
 enum opcode_t {
 	OP_STOP=0, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_MAP, OP_VECTOR,
 	OP_UNMAP, OP_MARK, OP_LIMIT, OP_LOOP, OP_UNLOOP, OP_CLEAN, OP_BREAK, OP_CONTINUE, OP_JMP, OP_JFALSE,
-	OP_JTRUE, OP_AND, OP_OR, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT, OP_ASSIGN,
+	OP_JTRUE, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT, OP_ASSIGN, OP_AND, OP_OR,
 	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
 	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_PID, OP_GC,
 	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
@@ -76,7 +76,7 @@ const char* type_names[TYPES] = {
 
 enum {
 	NODE_MULTI=1, NODE_NAME, NODE_LITERAL, NODE_OPCODE, NODE_IF, NODE_WHILE, NODE_FUNCTION, NODE_RETURN,
-	NODE_BUILTIN, NODE_VEC, NODE_MAP, NODE_FOR
+	NODE_BUILTIN, NODE_VEC, NODE_MAP, NODE_FOR, NODE_CALL_CHAIN
 };
 
 #define STRTMP 100
@@ -172,20 +172,21 @@ typedef struct {
 
 // order is important; longer names matched first
 operator_t operators[] = {
-	{ .name = "and", .precedence = 0, .opcode = OP_AND,   .argc = 2 },
-	{ .name = "or",  .precedence = 0, .opcode = OP_OR,    .argc = 2 },
-	{ .name = "==",  .precedence = 1, .opcode = OP_EQ,    .argc = 2 },
-	{ .name = "!=",  .precedence = 1, .opcode = OP_NE,    .argc = 2 },
-	{ .name = ">=",  .precedence = 1, .opcode = OP_GTE,   .argc = 2 },
-	{ .name = ">",   .precedence = 1, .opcode = OP_GT,    .argc = 2 },
-	{ .name = "<=",  .precedence = 1, .opcode = OP_LTE,   .argc = 2 },
-	{ .name = "<",   .precedence = 1, .opcode = OP_LT,    .argc = 2 },
-	{ .name = "~",   .precedence = 1, .opcode = OP_MATCH, .argc = 2 },
-	{ .name = "+",   .precedence = 3, .opcode = OP_ADD,   .argc = 2 },
-	{ .name = "-",   .precedence = 3, .opcode = OP_SUB,   .argc = 2 },
-	{ .name = "*",   .precedence = 4, .opcode = OP_MUL,   .argc = 2 },
-	{ .name = "/",   .precedence = 4, .opcode = OP_DIV,   .argc = 2 },
-	{ .name = "%",   .precedence = 4, .opcode = OP_MOD,   .argc = 2 },
+	{ .name = "||", .precedence = 0, .opcode = OP_OR,    .argc = 2 },
+	{ .name = "or", .precedence = 0, .opcode = OP_OR,    .argc = 2 },
+	{ .name = "&&", .precedence = 1, .opcode = OP_AND,   .argc = 2 },
+	{ .name = "==", .precedence = 2, .opcode = OP_EQ,    .argc = 2 },
+	{ .name = "!=", .precedence = 2, .opcode = OP_NE,    .argc = 2 },
+	{ .name = ">=", .precedence = 2, .opcode = OP_GTE,   .argc = 2 },
+	{ .name = ">",  .precedence = 2, .opcode = OP_GT,    .argc = 2 },
+	{ .name = "<=", .precedence = 2, .opcode = OP_LTE,   .argc = 2 },
+	{ .name = "<",  .precedence = 2, .opcode = OP_LT,    .argc = 2 },
+	{ .name = "~",  .precedence = 2, .opcode = OP_MATCH, .argc = 2 },
+	{ .name = "+",  .precedence = 3, .opcode = OP_ADD,   .argc = 2 },
+	{ .name = "-",  .precedence = 3, .opcode = OP_SUB,   .argc = 2 },
+	{ .name = "*",  .precedence = 4, .opcode = OP_MUL,   .argc = 2 },
+	{ .name = "/",  .precedence = 4, .opcode = OP_DIV,   .argc = 2 },
+	{ .name = "%",  .precedence = 4, .opcode = OP_MOD,   .argc = 2 },
 };
 
 typedef keyword_t modifier_t;
@@ -355,8 +356,11 @@ static int parse_node(rela_vm* vm, const char *source);
 #define RESULTS_FIRST 1
 #define RESULTS_ALL -1
 
-#define PARSE_GREEDY 1
-#define PARSE_UNGREEDY 2
+#define PARSE_UNGREEDY 0
+// parse() consumes multiple nodes: a[,b]
+#define PARSE_COMMA 1<<0
+// parse() consumes and/or nodes: x and y or z
+#define PARSE_ANDOR 1<<2
 
 #define PROCESS_ASSIGN (1<<0)
 #define PROCESS_CHAIN (1<<1)
@@ -1095,7 +1099,7 @@ static int parse_block(rela_vm* vm, const char *source, node_t *node) {
 			break;
 		}
 
-		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
+		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_COMMA|PARSE_ANDOR);
 		vec_push_allot(vm, &node->vals, pop(vm));
 	}
 
@@ -1132,7 +1136,7 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 			break;
 		}
 
-		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
+		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_COMMA|PARSE_ANDOR);
 		vec_push_allot(vm, &node->vals, pop(vm));
 	}
 
@@ -1149,7 +1153,7 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 				break;
 			}
 
-			offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
+			offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_COMMA|PARSE_ANDOR);
 			vec_push_allot(vm, &node->keys, pop(vm));
 		}
 	}
@@ -1174,7 +1178,7 @@ static int parse_arglist(rela_vm* vm, const char *source) {
 		offset += skip_gap(&source[offset]);
 
 		if (source[offset] != ')') {
-			offset += parse(vm, &source[offset], RESULTS_ALL, PARSE_GREEDY);
+			offset += parse(vm, &source[offset], RESULTS_ALL, PARSE_COMMA|PARSE_ANDOR);
 			offset += skip_gap(&source[offset]);
 		}
 
@@ -1182,7 +1186,7 @@ static int parse_arglist(rela_vm* vm, const char *source) {
 		offset++;
 	}
 	else {
-		offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
+		offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
 	}
 
 	if (depth(vm) == mark)
@@ -1244,7 +1248,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				node->type = NODE_IF;
 
 				// conditions
-				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
+				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
 				node->args = pop(vm).node;
 
 				// block, optional else
@@ -1256,7 +1260,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				node->type = NODE_WHILE;
 
 				// conditions
-				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
+				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
 				node->args = pop(vm).node;
 
 				// block
@@ -1287,7 +1291,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				if (peek(&source[offset], "in")) offset += 2;
 
 				// iterable
-				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
+				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
 				node->args = pop(vm).node;
 
 				// block
@@ -1363,7 +1367,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 
 				if (!peek(&source[offset], "end"))
 				{
-					offset += parse(vm, &source[offset], RESULTS_ALL, PARSE_GREEDY);
+					offset += parse(vm, &source[offset], RESULTS_ALL, PARSE_COMMA|PARSE_ANDOR);
 					node->args = pop(vm).node;
 				}
 			}
@@ -1469,8 +1473,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			// chain extra OP_CALLs.
 			if (prev->index || prev->call || prev->args) {
 				node_t* call = node_allot(vm);
-				call->type = NODE_OPCODE;
-				call->opcode = OP_CALL;
+				call->type = NODE_CALL_CHAIN;
 				call->args = pop(vm).node;
 				prev->chain = call;
 				prev = call;
@@ -1539,7 +1542,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 
 			if (source[offset] == '(') {
 				offset++;
-				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_GREEDY);
+				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
 				arguments[argument++] = pop(vm).node;
 				arguments[argument-1]->results = 1;
 				offset += skip_gap(&source[offset]);
@@ -1556,7 +1559,10 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 
 			for (int i = 0; i < sizeof(operators) / sizeof(operator_t); i++) {
 				operator_t *op = &operators[i];
-				if (!strncmp(op->name, &source[offset], strlen(op->name))) {
+				int oplen = strlen(op->name);
+				if (!strncmp(op->name, &source[offset], oplen)) {
+					// and/or needs a trailing space
+					if (isalpha(op->name[oplen-1]) && !isspace(source[offset+oplen])) continue;
 					compare = op;
 					break;
 				}
@@ -1610,7 +1616,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 			continue;
 		}
 
-		if (source[offset] == ',' && mode == PARSE_GREEDY) {
+		if (source[offset] == ',' && (mode & PARSE_COMMA)) {
 			offset++;
 			continue;
 		}
@@ -1638,21 +1644,23 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		assert(!node->args);
 		assert(vec_size(vm, node->vals));
 
-		// stack frame
-		compile(vm, OP_MARK, nil(vm));
+		// substack frame
+		if (node->results != RESULTS_ALL)
+			compile(vm, OP_MARK, nil(vm));
 
-		// stream the values onto the stack
+		// stream the values onto the substack
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
 			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
-		// OP_SET|OP_ASSIGN index values from the start of the current stack frame
+		// OP_SET|OP_ASSIGN index values from the start of the current substack frame
 		for (int i = 0; i < vec_size(vm, node->keys); i++) {
 			node_t* subnode = vec_get(vm, node->keys, i).node;
 			process(vm, subnode, PROCESS_ASSIGN, i);
 		}
 
-		// end stack frame
-		compile(vm, OP_LIMIT, integer(vm, node->results));
+		// end substack frame
+		if (node->results != RESULTS_ALL)
+			compile(vm, OP_LIMIT, integer(vm, node->results));
 	}
 	else
 	if (node->type == NODE_NAME) {
@@ -1660,46 +1668,44 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// function or function-like opcode call
 		if (node->call) {
+			assert(!assigning);
 
 			// vecmap[fn()]
 			if (node->index) {
 				compile(vm, OP_MARK, nil(vm));
-				if (node->args)
-					process(vm, node->args, 0, 0);
-				compile(vm, OP_LIT, node->item);
-				compile(vm, OP_FIND, nil(vm));
-				compile(vm, OP_CALL, nil(vm));
+					compile(vm, OP_MARK, nil(vm));
+						if (node->args)
+							process(vm, node->args, 0, 0);
+						compile(vm, OP_LIT, node->item);
+						compile(vm, OP_FIND, nil(vm));
+						compile(vm, OP_CALL, nil(vm));
+					compile(vm, OP_LIMIT, integer(vm, -1));
 				compile(vm, OP_LIMIT, integer(vm, 1));
-				compile(vm, assigning ? OP_SET: OP_GET, nil(vm));
+				compile(vm, OP_GET, nil(vm));
 			}
 
 			// .fn()
 			if (node->field) {
 				compile(vm, OP_LIT, node->item);
-				compile(vm, assigning ? OP_SET: OP_GET, nil(vm));
-				if (node->args) {
-					compile(vm, OP_SHUNT, nil(vm));
-					process(vm, node->args, 0, 0);
+				compile(vm, OP_GET, nil(vm));
+				compile(vm, OP_SHUNT, nil(vm));
+				compile(vm, OP_MARK, nil(vm));
+					if (node->args)
+						process(vm, node->args, 0, 0);
 					compile(vm, OP_SHIFT, nil(vm));
-				}
-				compile(vm, OP_CALL, nil(vm));
+					compile(vm, OP_CALL, nil(vm));
+				compile(vm, OP_LIMIT, integer(vm, -1));
 			}
 
 			// fn()
 			if (!node->index && !node->field) {
-				if (node->args)
-					process(vm, node->args, 0, 0);
-
-				compile(vm, OP_LIT, node->item);
-
-				if (assigning) {
-					compile(vm, OP_ASSIGN, integer(vm, index));
-				}
-				else {
+				compile(vm, OP_MARK, nil(vm));
+					if (node->args)
+						process(vm, node->args, 0, 0);
+					compile(vm, OP_LIT, node->item);
 					compile(vm, OP_FIND, nil(vm));
-				}
-
-				compile(vm, OP_CALL, nil(vm));
+					compile(vm, OP_CALL, nil(vm));
+				compile(vm, OP_LIMIT, integer(vm, -1));
 			}
 		}
 		// variable reference
@@ -1779,29 +1785,56 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_LIMIT, integer(vm, 1));
 	}
 	else
+	// function/opcode call
+	if (node->type == NODE_CALL_CHAIN) {
+		compile(vm, OP_SHUNT, nil(vm));
+		compile(vm, OP_MARK, nil(vm));
+			if (node->args)
+				process(vm, node->args, 0, 0);
+			compile(vm, OP_SHIFT, nil(vm));
+			for (int i = 0; i < vec_size(vm, node->vals); i++)
+				process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			compile(vm, OP_CALL, nil(vm));
+		compile(vm, OP_LIMIT, integer(vm, -1));
+
+		if (node->index) {
+			compile(vm, assigning ? OP_SET: OP_GET, nil(vm));
+		}
+
+		if (node->chain) {
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
+		}
+	}
+	else
+	if (node->type == NODE_OPCODE && node->opcode == OP_AND) {
+		assert(vec_size(vm, node->vals) == 2);
+		process(vm, vec_get(vm, node->vals, 0).node, 0, 0);
+		int jump = compile(vm, OP_JFALSE, nil(vm));
+		compile(vm, OP_DROP, nil(vm));
+		process(vm, vec_get(vm, node->vals, 1).node, 0, 0);
+		compiled(vm, jump)->item = integer(vm, vm->code.depth);
+	}
+	else
+	if (node->type == NODE_OPCODE && node->opcode == OP_OR) {
+		assert(vec_size(vm, node->vals) == 2);
+		process(vm, vec_get(vm, node->vals, 0).node, 0, 0);
+		int jump = compile(vm, OP_JTRUE, nil(vm));
+		compile(vm, OP_DROP, nil(vm));
+		process(vm, vec_get(vm, node->vals, 1).node, 0, 0);
+		compiled(vm, jump)->item = integer(vm, vm->code.depth);
+	}
 	// inline opcode
+	else
 	if (node->type == NODE_OPCODE) {
-		if (node->opcode == OP_CALL)
-			compile(vm, OP_SHUNT, nil(vm));
+		assert(node->opcode != OP_CALL);
 
 		if (node->args)
 			process(vm, node->args, 0, 0);
 
-		if (node->opcode == OP_CALL)
-			compile(vm, OP_SHIFT, nil(vm));
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
 
-		if (node->opcode == OP_AND || node->opcode == OP_OR) {
-			process(vm, vec_get(vm, node->vals, 0).node, 0, 0);
-			int jump = compile(vm, node->opcode, nil(vm));
-			process(vm, vec_get(vm, node->vals, 1).node, 0, 0);
-			compiled(vm, jump)->item = integer(vm, vm->code.depth);
-		}
-		else {
-			for (int i = 0; i < vec_size(vm, node->vals); i++)
-				process(vm, vec_get(vm, node->vals, i).node, 0, 0);
-
-			compile(vm, node->opcode, nil(vm));
-		}
+		compile(vm, node->opcode, nil(vm));
 
 		if (node->index) {
 			compile(vm, assigning ? OP_SET: OP_GET, nil(vm));
@@ -1854,7 +1887,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 				if (length) {
 					const char *sub = substr(vm, start, 0, length);
-					ensure(vm, length == parse(vm, sub, RESULTS_FIRST, PARSE_GREEDY), "string interpolation parsing failed");
+					ensure(vm, length == parse(vm, sub, RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR), "string interpolation parsing failed");
 					process(vm, pop(vm).node, 0, 0);
 					if (started) compile(vm, OP_CONCAT, nil(vm));
 					started = true;
@@ -2052,7 +2085,7 @@ static void source(rela_vm* vm, const char *source) {
 	int offset = skip_gap(source);
 
 	while (source[offset])
-		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_GREEDY);
+		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_COMMA|PARSE_ANDOR);
 
 	for (int i = 0, l = depth(vm); i < l; i++)
 		process(vm, item(vm, i)->node, 0, 0);
@@ -2087,12 +2120,37 @@ static void op_print(rela_vm* vm) {
 	fflush(stdout);
 }
 
+static void op_clean(rela_vm* vm) {
+	while (depth(vm)) pop(vm);
+}
+
 static void op_map(rela_vm* vm) {
 	vec_push(vm, &routine(vm)->maps, (item_t){.type = MAP, .map = map_allot(vm)});
 }
 
 static void op_unmap(rela_vm* vm) {
 	push(vm, (item_t){.type = MAP, .map = vec_pop(vm, &routine(vm)->maps).map});
+}
+
+static void op_mark(rela_vm* vm) {
+	vec_push(vm, &routine(vm)->marks, integer(vm, vec_size(vm, stack(vm))));
+}
+
+static void op_unmark(rela_vm* vm) {
+	vec_pop(vm, &routine(vm)->marks);
+}
+
+static void limit(rela_vm* vm, int count) {
+	int old_depth = vec_pop(vm, &routine(vm)->marks).inum;
+	int req_depth = old_depth + count;
+	if (count >= 0) {
+		while (req_depth < vec_size(vm, stack(vm))) pop(vm);
+		while (req_depth > vec_size(vm, stack(vm))) push(vm, nil(vm));
+	}
+}
+
+static void op_limit(rela_vm* vm) {
+	limit(vm, literal_int(vm));
 }
 
 #define FRAME 5
@@ -2136,12 +2194,22 @@ static void depart(rela_vm* vm) {
 static void op_coroutine(rela_vm* vm) {
 	cor_t *cor = cor_allot(vm);
 
-	int ip = pop_type(vm, SUBROUTINE).sub;
+	ensure(vm, depth(vm) && item(vm, 0)->type == SUBROUTINE, "coroutine missing subroutine");
+
+	int ip = item(vm, 0)->sub;
 
 	cor->state = COR_RUNNING;
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 
 	arrive(vm, ip);
+	op_mark(vm);
+
+	int items = depth(vm);
+
+	for (int i = 1; i < items; i++)
+		vec_push(vm, &cor->stack, *item(vm, i));
+
+	op_clean(vm);
 
 	vec_pop(vm, &vm->routines);
 	cor->state = COR_SUSPENDED;
@@ -2150,7 +2218,9 @@ static void op_coroutine(rela_vm* vm) {
 }
 
 static void op_resume(rela_vm* vm) {
-	cor_t *cor = pop_type(vm, COROUTINE).cor;
+	ensure(vm, depth(vm) && item(vm, 0)->type == COROUTINE, "resume missing coroutine");
+
+	cor_t *cor = item(vm, 0)->cor;
 
 	if (cor->state == COR_DEAD) {
 		push(vm, nil(vm));
@@ -2164,7 +2234,7 @@ static void op_resume(rela_vm* vm) {
 	for (int i = 1; i < items; i++)
 		vec_push(vm, &cor->stack, *item(vm, i));
 
-	for (int i = 1; i < items; i++)
+	for (int i = 0; i < items; i++)
 		pop(vm);
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
@@ -2191,29 +2261,34 @@ static void op_global(rela_vm* vm) {
 	push(vm, (item_t){.type = MAP, .map = vm->scope_global});
 }
 
-static void call(rela_vm* vm, item_t item) {
+static void op_call(rela_vm* vm) {
+	item_t item = pop(vm);
+
 	if (item.type == CALLBACK) {
 		item.cb((rela_vm*)vm);
 		return;
 	}
 
+	int args = depth(vm);
+
 	char tmp[STRTMP];
 	ensure(vm, item.type == SUBROUTINE, "invalid function: %s (ip: %u)", tmptext(vm, item, tmp, sizeof(tmp)), routine(vm)->ip);
 
 	arrive(vm, item.sub);
-}
 
-static void op_call(rela_vm* vm) {
-	call(vm, pop(vm));
-}
-
-static void op_clean(rela_vm* vm) {
-	while (depth(vm)) pop(vm);
+	op_mark(vm);
+	// subroutines need to know the base of their subframe,
+	// which is the same as the current depth of the outer
+	// frame mark
+	vec_cell(vm, &routine(vm)->marks, -1)->inum -= args;
 }
 
 static void op_return(rela_vm* vm) {
 	cor_t* cor = routine(vm);
 
+	// subroutines leave only results in their subframe, which
+	// migrate to the caller frame when depart() truncates the
+	// marks stack
 	depart(vm);
 
 	if (!cor->ip) {
@@ -2239,27 +2314,6 @@ static void op_loop(rela_vm* vm) {
 static void op_unloop(rela_vm* vm) {
 	vec_pop(vm, &routine(vm)->loops);
 	ensure(vm, vec_pop(vm, &routine(vm)->loops).inum == vec_size(vm, &routine(vm)->marks), "mark stack mismatch (unloop)");
-}
-
-static void op_mark(rela_vm* vm) {
-	vec_push(vm, &routine(vm)->marks, integer(vm, vec_size(vm, stack(vm))));
-}
-
-static void op_unmark(rela_vm* vm) {
-	vec_pop(vm, &routine(vm)->marks);
-}
-
-static void limit(rela_vm* vm, int count) {
-	int old_depth = vec_pop(vm, &routine(vm)->marks).inum;
-	int req_depth = old_depth + count;
-	if (count >= 0) {
-		while (req_depth < vec_size(vm, stack(vm))) pop(vm);
-		while (req_depth > vec_size(vm, stack(vm))) push(vm, nil(vm));
-	}
-}
-
-static void op_limit(rela_vm* vm) {
-	limit(vm, literal_int(vm));
 }
 
 static void op_break(rela_vm* vm) {
@@ -2306,16 +2360,6 @@ static void op_jfalse(rela_vm* vm) {
 
 static void op_jtrue(rela_vm* vm) {
 	if (truth(vm, top(vm))) op_jmp(vm);
-}
-
-static void op_and(rela_vm* vm) {
-	if (!truth(vm, top(vm))) op_jmp(vm);
-	else pop(vm);
-}
-
-static void op_or(rela_vm* vm) {
-	if (truth(vm, top(vm))) op_jmp(vm);
-	else pop(vm);
 }
 
 static void op_vector(rela_vm* vm) {
@@ -2425,8 +2469,8 @@ static void op_assign(rela_vm* vm) {
 	item_t key = pop(vm);
 
 	int index = literal_int(vm);
-	// indexed from the base of the current marked frame
-	item_t val = depth(vm) ? *item(vm, index): nil(vm);
+	// indexed from the base of the current subframe
+	item_t val = depth(vm) > index ? *item(vm, index): nil(vm);
 
 	assign(vm, key, val);
 }
@@ -2820,7 +2864,8 @@ static void op_a2lit(rela_vm* vm) {
 // assign0,limit0
 static void op_assignl(rela_vm* vm) {
 	item_t key = pop(vm);
-	item_t val = pop(vm);
+	// indexed from the base of the current subframe
+	item_t val = depth(vm) ? top(vm): nil(vm);
 	assign(vm, key, val);
 	limit(vm, 0);
 }
@@ -2836,6 +2881,9 @@ typedef struct {
 	bool lib;
 	rela_callback func;
 } func_t;
+
+static void nop(rela_vm* vm) {
+}
 
 func_t funcs[OPERATIONS] = {
 	[OP_STOP]      = { .name = "stop",      .lib = false, .func = op_stop      },
@@ -2856,8 +2904,6 @@ func_t funcs[OPERATIONS] = {
 	[OP_CLEAN]     = { .name = "clean",     .lib = false, .func = op_clean     },
 	[OP_BREAK]     = { .name = "break",     .lib = false, .func = op_break     },
 	[OP_CONTINUE]  = { .name = "continue",  .lib = false, .func = op_continue  },
-	[OP_AND]       = { .name = "and",       .lib = false, .func = op_and       },
-	[OP_OR]        = { .name = "or",        .lib = false, .func = op_or        },
 	[OP_JMP]       = { .name = "jmp",       .lib = false, .func = op_jmp       },
 	[OP_JFALSE]    = { .name = "jfalse",    .lib = false, .func = op_jfalse    },
 	[OP_JTRUE]     = { .name = "jtrue",     .lib = false, .func = op_jtrue     },
@@ -2887,6 +2933,8 @@ func_t funcs[OPERATIONS] = {
 	[OP_LTE]       = { .name = "lte",       .lib = false, .func = op_lte       },
 	[OP_GT]        = { .name = "gt",        .lib = false, .func = op_gt        },
 	[OP_GTE]       = { .name = "gte",       .lib = false, .func = op_gte       },
+	[OP_AND]       = { .name = "and",       .lib = false, .func = nop          },
+	[OP_OR]        = { .name = "or",        .lib = false, .func = nop          },
 	[OP_CONCAT]    = { .name = "concat",    .lib = false, .func = op_concat    },
 	[OP_MATCH]     = { .name = "match",     .lib = false, .func = op_match     },
 	[OP_SORT]      = { .name = "sort",      .lib = true,  .func = op_sort      },
@@ -3069,7 +3117,33 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 			assert(ip >= 0 && ip < vm->code.depth);
 			int opcode = vm->code.cells[ip].op;
 			if (opcode == OP_STOP) break;
+
+			#ifdef TRACE
+				code_t* c = &vm->code.cells[ip];
+				char tmpA[STRTMP];
+				const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
+				for (int i = 0, l = vec_size(vm, &routine(vm)->marks); i < l; i++)
+					fprintf(stderr, "  ");
+				fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
+				fflush(stderr);
+			#endif
+
 			funcs[opcode].func(vm);
+
+			#ifdef TRACE
+				fprintf(stderr, "[");
+				for (int i = 0, l = vec_size(vm, stack(vm)); i < l; i++) {
+					if (i == l-depth(vm))
+						fprintf(stderr, "|");
+					char tmpB[STRTMP];
+					fprintf(stderr, "%s%s",
+						tmptext(vm, vec_get(vm, stack(vm), i), tmpB, sizeof(tmpB)),
+						(i < l-1 ? ", ":"")
+					);
+				}
+				fprintf(stderr, "]\n");
+				fflush(stderr);
+			#endif
 		}
 	}
 
@@ -3218,6 +3292,10 @@ rela_item rela_map_get(rela_vm* vm, rela_item map, rela_item key) {
 	item_t ikey = *((item_t*)&key);
 	push(vm, get(vm, imap, ikey));
 	return rela_pop(vm);
+}
+
+rela_item rela_map_get_named(rela_vm* vm, rela_item map, const char* field) {
+	return rela_map_get(vm, map, rela_make_string(vm, field));
 }
 
 void rela_map_set(rela_vm* vm, rela_item map, rela_item key, rela_item val) {

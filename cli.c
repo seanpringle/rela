@@ -38,9 +38,9 @@ int run(const char* source, bool decompile) {
 	rela_vm* rela = rela_create(source, 1, registry, NULL);
 	if (!rela) return 1;
 
-	int rc = rela_run(rela);
-
 	if (decompile) rela_decompile(rela);
+
+	int rc = rela_run(rela);
 
 	rela_destroy(rela);
 

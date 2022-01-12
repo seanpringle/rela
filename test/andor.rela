@@ -1,0 +1,15 @@
+
+lib.assert((1 && 2) == 2)
+lib.assert((1 || 2) == 1)
+lib.assert((1 && 2 || 3) == 2)
+lib.assert((0 && 0 || 3) == 3)
+
+lib.assert((nil && nil) == nil)
+lib.assert((1 && nil) == nil)
+lib.assert((1 && 2) == 2)
+
+lib.assert((nil || nil) == nil)
+lib.assert((nil || 2) == 2)
+lib.assert((1 || nil) == 1)
+lib.assert((1 || 2) == 1)
+

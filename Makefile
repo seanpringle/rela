@@ -1,6 +1,6 @@
 
 dev: LFLAGS=-lm -lpcre
-dev: CFLAGS=-Wall -Werror -O0 -g -std=c11 -DPCRE
+dev: CFLAGS=-Wall -Werror -O0 -g -std=c11 -DPCRE -DTRACE
 dev: rela.o cli.o
 	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
 
@@ -23,7 +23,8 @@ prof: rel
 %.o: %.c *.h
 	gcc $(CFLAGS) -c $< -o $@
 
-test: dev
+.PHONY: test
+test:
 	$(foreach script, $(wildcard test/*), echo $(script) && ./rela $(script) &&) true
 
 leak: dev
