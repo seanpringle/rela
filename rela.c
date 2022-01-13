@@ -1421,7 +1421,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				offset++;
 				continue;
 			}
-			offset += parse_node(vm, &source[offset]);
+			offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_ANDOR);
 			vec_push_allot(vm, &node->vals, pop(vm));
 		}
 		ensure(vm, source[offset] == ']', "expected closing bracket: %s", &source[offset]);
