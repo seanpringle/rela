@@ -49,7 +49,7 @@ enum opcode_t {
 	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
 	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_PID, OP_GC,
 	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
-	OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE,
+	OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE, OP_UNPACK,
 	OPP_MARKS, OPP_FNAME, OPP_GNAME, OPP_CNAME, OPP_A2LIT, OPP_ASSIGNL, OPP_UNMAP,
 	OPERATIONS
 };
@@ -187,6 +187,7 @@ operator_t operators[] = {
 	{ .name = "*",  .precedence = 4, .opcode = OP_MUL,   .argc = 2 },
 	{ .name = "/",  .precedence = 4, .opcode = OP_DIV,   .argc = 2 },
 	{ .name = "%",  .precedence = 4, .opcode = OP_MOD,   .argc = 2 },
+	{ .name = "...",.precedence = 4, .opcode = OP_UNPACK,.argc = 1 },
 };
 
 typedef keyword_t modifier_t;
@@ -1498,7 +1499,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 		}
 
 		// chained map.field.subfield expressions
-		if (source[offset] == '.') {
+		if (source[offset] == '.' && isnamefirst(source[offset+1])) {
 			offset++;
 			offset += parse_node(vm, &source[offset]);
 			prev->chain = pop(vm).node;
@@ -1585,6 +1586,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 			}
 
 			operations[operation++] = compare;
+			if (compare->argc == 1 && argument > 0) break;
 		}
 
 		while (operation && argument) {
@@ -1600,7 +1602,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 			arguments[argument++] = result;
 		}
 
-		ensure(vm, !operation && argument == 1, "unbalanced expression");
+		ensure(vm, !operation && argument == 1, "unbalanced expression: %s", &source[offset]);
 		vec_push_allot(vm, &node->vals, (item_t){.type = NODE, .node = arguments[0]});
 
 		offset += skip_gap(&source[offset]);
@@ -2376,6 +2378,13 @@ static void op_vector(rela_vm* vm) {
 	push(vm, (item_t){.type = VECTOR, .vec = vec});
 }
 
+static void op_unpack(rela_vm* vm) {
+	vec_t* vec = pop_type(vm, VECTOR).vec;
+
+	for (int i = 0, l = vec_size(vm, vec); i < l; i++)
+		push(vm, vec_get(vm, vec, i));
+}
+
 static void op_pid(rela_vm* vm) {
 	vec_push(vm, &routine(vm)->paths, literal(vm));
 }
@@ -2936,6 +2945,7 @@ func_t funcs[OPERATIONS] = {
 	[OP_AND]       = { .name = "and",       .lib = false, .func = nop          },
 	[OP_OR]        = { .name = "or",        .lib = false, .func = nop          },
 	[OP_CONCAT]    = { .name = "concat",    .lib = false, .func = op_concat    },
+	[OP_UNPACK]    = { .name = "unpack",    .lib = false, .func = op_unpack    },
 	[OP_MATCH]     = { .name = "match",     .lib = false, .func = op_match     },
 	[OP_SORT]      = { .name = "sort",      .lib = true,  .func = op_sort      },
 	[OP_PID]       = { .name = "pid",       .lib = false, .func = op_pid       },
