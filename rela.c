@@ -76,7 +76,7 @@ const char* type_names[TYPES] = {
 
 enum {
 	NODE_MULTI=1, NODE_NAME, NODE_LITERAL, NODE_OPCODE, NODE_IF, NODE_WHILE, NODE_FUNCTION, NODE_RETURN,
-	NODE_BUILTIN, NODE_VEC, NODE_MAP, NODE_FOR, NODE_CALL_CHAIN
+	NODE_VEC, NODE_MAP, NODE_FOR, NODE_CALL_CHAIN
 };
 
 #define STRTMP 100
@@ -1422,7 +1422,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				offset++;
 				continue;
 			}
-			offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_ANDOR);
+			offset += parse(vm, &source[offset], RESULTS_ALL, PARSE_ANDOR);
 			vec_push_allot(vm, &node->vals, pop(vm));
 		}
 		ensure(vm, source[offset] == ']', "expected closing bracket: %s", &source[offset]);
@@ -1923,21 +1923,6 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		}
 	}
 	else
-	// a built-in function-like keyword with arguments
-	if (node->type == NODE_BUILTIN) {
-		assert(!vec_size(vm, node->keys) && !vec_size(vm, node->vals));
-
-		compile(vm, OP_MARK, nil(vm));
-
-		if (node->args)
-			process(vm, node->args, 0, 0);
-
-		compile(vm, node->opcode, nil(vm));
-		compile(vm, OP_LIMIT, integer(vm, node->results));
-
-		ensure(vm, !assigning, "cannot assign to keyword");
-	}
-	else
 	// if expression ... [else ...] end
 	// (returns a value for ternary style assignment)
 	if (node->type == NODE_IF) {
@@ -2057,9 +2042,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		assert(!node->args);
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++) {
-			compile(vm, OP_MARK, nil(vm));
 			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
-			compile(vm, OP_LIMIT, integer(vm, 1));
 		}
 
 		compile(vm, OP_VECTOR, nil(vm));

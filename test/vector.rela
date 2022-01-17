@@ -1,13 +1,18 @@
 
-vec = [1,2,3]
-lib.assert(#vec == 3)
-vec[#vec] = 4
-lib.assert(#vec == 4)
+//vec = [1,2,3]
+//lib.assert(#vec == 3)
+//vec[#vec] = 4
+//lib.assert(#vec == 4)
+//
+//a, b, c = vec...
+//
+//lib.assert(global.a == 1)
+//lib.assert(global.b == 2)
+//lib.assert(global.c == 3)
 
-a, b, c = vec...
+function test()
+	return [1, 2, 3]
+end
 
-lib.assert(global.a == 1)
-lib.assert(global.b == 2)
-lib.assert(global.c == 3)
-
+print([test()...])
 
