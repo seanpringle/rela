@@ -98,26 +98,25 @@ print(min(2,1,3))
 ### vector
 
 ```lua
-cells = [1,3,5]
-print(cells, cells[1])
-cells[#cells] = 7
-print(cells)
+stuff = [1,3,5]
+print(stuff)
+stuff[#stuff] = 7
+print(stuff)
+print(stuff[1])
 ```
 
 ```
-[1, 3, 5]    3
+[1, 3, 5]
 [1, 3, 5, 7]
 ```
 
 ```lua
-function test()
-  return 1, 2, 3
-end
+function test() return 1, 2, 3 end
 print(test(), [test()])
 ```
 
 ```
-1    2    3    [1, 2, 3]
+1       2       3       [1, 2, 3]
 ```
 
 ```lua
@@ -138,7 +137,7 @@ print(stuff, stuff.apples, stuff["oranges"])
 ```
 
 ```
-{ apples = 1, oranges = 2 }    1    2
+{apples = 1, oranges = 2}       1       2
 ```
 
 ### if
@@ -182,8 +181,8 @@ for cell in [1,3,5] print(cell) end
 ```
 
 ```lua
-cells = [1,3,5]
-for i in #cells print("$i : $(cells[i])") end
+stuff = [1,3,5]
+for i in #stuff print("$i : $(cells[i])") end
 ```
 
 ```
