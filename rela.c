@@ -1785,6 +1785,17 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		// will sub dead code
 
 		compile(vm, OP_LIMIT, integer(vm, 1));
+
+		// function() ... end()
+		if (node->call) {
+			compile(vm, OP_SHUNT, nil(vm));
+			compile(vm, OP_MARK, nil(vm));
+				if (node->args)
+					process(vm, node->args, 0, 0);
+				compile(vm, OP_SHIFT, nil(vm));
+				compile(vm, OP_CALL, nil(vm));
+			compile(vm, OP_LIMIT, integer(vm, -1));
+		}
 	}
 	else
 	// function/opcode call

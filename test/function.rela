@@ -36,3 +36,6 @@ end
 lib.assert(global.inner == nil)
 
 outer()
+
+lib.assert(1 == function() return 1 end())
+

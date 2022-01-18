@@ -68,7 +68,8 @@ embedded scripting language is the one you figure out how to avoid using at all!
 ## Keywords
 
 ```
-if else end while for break continue return function nil true false or global lib print
+if else end while for in break continue return function nil true false or
+global lib print
 ```
 
 The `print` keyword can be overriden.
@@ -78,17 +79,126 @@ The `print` keyword can be overriden.
 The `lib` namespace holds other functions:
 
 ```
-assert collect coroutine resume yield sort type sin cos tan asin acos atan sinh cosh tanh ceil floor sqrt abs
-atan2 log log10 pow min max
+assert collect coroutine resume yield sort type sin cos tan asin acos atan sinh
+cosh tanh ceil floor sqrt abs atan2 log log10 pow min max
 ```
 
 Any `lib` function can be assigned to a local variable for brevity and
 performance.
 
 ```lua
-> min = lib.min
-> print(min(2,1,3))
+min = lib.min
+print(min(2,1,3))
+```
+
+```
 1
+```
+
+### vector
+
+```lua
+cells = [1,3,5]
+print(cells, cells[1])
+cells[#cells] = 7
+print(cells)
+```
+
+```
+[1, 3, 5]    3
+[1, 3, 5, 7]
+```
+
+```lua
+function test()
+  return 1, 2, 3
+end
+print(test(), [test()])
+```
+
+```
+1    2    3    [1, 2, 3]
+```
+
+```lua
+alpha = [1, 2, 3]
+beta = [alpha..., 4, 5, 6]
+print(beta)
+```
+
+```
+[1, 2, 3, 4, 5, 6]
+```
+
+### map
+
+```lua
+stuff = { apples = 1, oranges = 2 }
+print(stuff, stuff.apples, stuff["oranges"])
+```
+
+```
+{ apples = 1, oranges = 2 }    1    2
+```
+
+### if
+
+```lua
+if 10 > 5 print("yes") else print("no") end
+```
+
+```
+yes
+```
+
+```lua
+print(if 10 > 5 "yes" else "no" end)
+```
+
+```
+yes
+```
+
+### for
+
+```lua
+for i in 3 print(i) end
+```
+
+```
+0
+1
+2
+```
+
+```lua
+for cell in [1,3,5] print(cell) end
+```
+
+```
+1
+3
+5
+```
+
+```lua
+cells = [1,3,5]
+for i in #cells print("$i : $(cells[i])") end
+```
+
+```
+0 : 1
+1 : 3
+2 : 5
+```
+
+```lua
+for key,val in { apples = 1, oranges = 2 } print("$key : $val") end
+```
+
+```
+apples : 1
+oranges : 2
 ```
 
 ## PCRE
@@ -97,7 +207,10 @@ The match operator `~` is available if Rela is built with PCRE, returning the
 full match and any groups:
 
 ```lua
-> print("abcd" ~ "(ab)(c)")
+print("abcd" ~ "(ab)(c)")
+```
+
+```
 abc     ab      c
 ```
 
