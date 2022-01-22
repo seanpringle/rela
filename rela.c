@@ -50,7 +50,7 @@ enum opcode_t {
 	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_PID, OP_GC,
 	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
 	OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE, OP_UNPACK,
-	OPP_MARKS, OPP_FNAME, OPP_GNAME, OPP_CNAME, OPP_A2LIT, OPP_ASSIGNL, OPP_UNMAP,
+	OPP_MARKS, OPP_FNAME, OPP_GNAME, OPP_CFUNC, OPP_A2LIT, OPP_ASSIGNL, OPP_UNMAP, OPP_COPIES,
 	OPERATIONS
 };
 
@@ -930,9 +930,31 @@ static int compile(rela_vm* vm, int op, item_t item) {
 			return vm->code.depth-1;
 		}
 
-		// lit,find -> fname
+		// lit,find -> fname (duplicate vars, single lookup array[#array])
 		if (op == OP_FIND && last->op == OP_LIT) {
-			last->op = OPP_FNAME;
+			for(;;) {
+				// fname,copies=n (n+1 stack items: one original + n copies)
+				if (vm->code.depth > 2) {
+					code_t* prior1 = compiled(vm, -2);
+					code_t* prior2 = compiled(vm, -3);
+					if (prior1->op == OPP_COPIES && prior2->op == OPP_FNAME && equal(vm, last->item, prior2->item)) {
+						prior1->item.inum++;
+						vm->code.depth--;
+						break;
+					}
+				}
+				// fname,copies=1 (two stack items: one original + one copy)
+				if (vm->code.depth > 1) {
+					code_t* prior = compiled(vm, -2);
+					if (prior->op == OPP_FNAME && equal(vm, last->item, prior->item)) {
+						last->op = OPP_COPIES;
+						last->item = integer(vm, 1);
+						break;
+					}
+				}
+				last->op = OPP_FNAME;
+				break;
+			}
 			return vm->code.depth-1;
 		}
 
@@ -942,9 +964,9 @@ static int compile(rela_vm* vm, int op, item_t item) {
 			return vm->code.depth-1;
 		}
 
-		// fname,call -> cname
+		// fname,call -> cfunc
 		if (op == OP_CALL && last->op == OPP_FNAME) {
-			last->op = OPP_CNAME;
+			last->op = OPP_CFUNC;
 			return vm->code.depth-1;
 		}
 
@@ -954,7 +976,7 @@ static int compile(rela_vm* vm, int op, item_t item) {
 			return vm->code.depth-1;
 		}
 
-		// mark,lit,lit,assign,limit0 -> a2lit
+		// mark,lit,lit,assign,limit0 -> lit,a2lit (map { litkey = litval })
 		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && vm->code.depth > 4) {
 			bool mark = vm->code.cells[vm->code.depth-4].op == OP_MARK;
 			bool lit1 = vm->code.cells[vm->code.depth-3].op == OP_LIT;
@@ -969,30 +991,27 @@ static int compile(rela_vm* vm, int op, item_t item) {
 			}
 		}
 
-		// assign0,limit0 -> assignl
-		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0) {
+		// lit,assign0,limit0 -> assignl
+		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && vm->code.depth > 2) {
 			bool assign = last->op == OP_ASSIGN && last->item.type == INTEGER && last->item.inum == 0;
-			if (assign) {
-				last->op = OPP_ASSIGNL;
+			code_t* prior = compiled(vm, -2);
+			if (assign && prior->op == OP_LIT) {
+				prior->op = OPP_ASSIGNL;
+				vm->code.depth--;
 				return vm->code.depth-1;
 			}
 		}
 
-		// mark,lit,limit-1 -> lit
-		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && vm->code.depth > 3) {
-			bool mark = vm->code.cells[vm->code.depth-2].op == OP_MARK;
-			bool marks = vm->code.cells[vm->code.depth-2].op == OPP_MARKS;
-			bool lit = vm->code.cells[vm->code.depth-1].op == OP_LIT;
-			if (mark && lit) {
-				vm->code.cells[vm->code.depth-2] = vm->code.cells[vm->code.depth-1];
-				vm->code.depth--;
-				return vm->code.depth-1;
-			}
-			if (marks && lit) {
-				vm->code.cells[vm->code.depth-2].item.inum--;
-				vm->code.depth--;
-				return vm->code.depth-1;
-			}
+		// lit,neg
+		if (op == OP_NEG && last->op == OP_LIT && last->item.type == INTEGER) {
+			last->item.inum = -last->item.inum;
+			return vm->code.depth-1;
+		}
+
+		// lit,neg
+		if (op == OP_NEG && last->op == OP_LIT && last->item.type == FLOAT) {
+			last->item.fnum = -last->item.fnum;
+			return vm->code.depth-1;
 		}
 	}
 
@@ -2210,6 +2229,8 @@ static void op_coroutine(rela_vm* vm) {
 	vec_pop(vm, &vm->routines);
 	cor->state = COR_SUSPENDED;
 
+	op_clean(vm);
+
 	push(vm, (item_t){.type = COROUTINE, .cor = cor});
 }
 
@@ -2864,11 +2885,11 @@ static void op_a2lit(rela_vm* vm) {
 	assign(vm, key, val);
 }
 
-// assign0,limit0
+// lit,assign0,limit0
 static void op_assignl(rela_vm* vm) {
-	item_t key = pop(vm);
+	item_t key = literal(vm);
 	// indexed from the base of the current subframe
-	item_t val = depth(vm) ? top(vm): nil(vm);
+	item_t val = depth(vm) ? *item(vm, 0): nil(vm);
 	assign(vm, key, val);
 	limit(vm, 0);
 }
@@ -2877,6 +2898,11 @@ static void op_assignl(rela_vm* vm) {
 static void op_unmapl(rela_vm* vm) {
 	op_unmap(vm);
 	limit(vm, 1);
+}
+
+// dups
+static void op_copies(rela_vm* vm) {
+	for (int i = 0, l = literal_int(vm); i < l; i++) push(vm, top(vm));
 }
 
 typedef struct {
@@ -2970,10 +2996,11 @@ func_t funcs[OPERATIONS] = {
 	[OPP_MARKS]    = { .name = "marks",     .lib = false, .func = op_marks     },
 	[OPP_FNAME]    = { .name = "fname",     .lib = false, .func = op_fname     },
 	[OPP_GNAME]    = { .name = "gname",     .lib = false, .func = op_gname     },
-	[OPP_CNAME]    = { .name = "cfunc",     .lib = false, .func = op_cfunc     },
+	[OPP_CFUNC]    = { .name = "cfunc",     .lib = false, .func = op_cfunc     },
 	[OPP_A2LIT]    = { .name = "a2lit",     .lib = false, .func = op_a2lit     },
 	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl   },
 	[OPP_UNMAP]    = { .name = "unmapl",    .lib = false, .func = op_unmapl    },
+	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies    },
 };
 
 static void decompile(rela_vm* vm, code_t* c) {
