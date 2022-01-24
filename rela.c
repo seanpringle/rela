@@ -129,6 +129,7 @@ typedef struct _cor_t {
 
 typedef struct{
 	enum opcode_t op;
+	int cache;
 	item_t item;
 } code_t; // compiled "bytecode"
 
@@ -312,6 +313,11 @@ typedef struct _rela_vm {
 		int depth;
 		int start;
 	} code;
+
+	struct {
+		item_t* cfunc;
+		int cfuncs;
+	} cache;
 
 	struct {
 		vec_t entries;
@@ -771,6 +777,8 @@ static int str_scan(const char *source, strcb cb) {
 static void reset(rela_vm* vm) {
 	vm->scope_global = NULL;
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
+	free(vm->cache.cfunc);
+	vm->cache.cfunc = NULL;
 	gc(vm);
 }
 
@@ -2117,6 +2125,10 @@ static int64_t literal_int(rela_vm* vm) {
 	return lit.type == INTEGER ? lit.inum: 0;
 }
 
+static int cache_slot(rela_vm* vm) {
+	return vm->code.cells[routine(vm)->ip-1].cache;
+}
+
 static void op_stop (rela_vm* vm) {
 }
 
@@ -2874,7 +2886,14 @@ static void op_gname(rela_vm* vm) {
 }
 
 static void op_cfunc(rela_vm* vm) {
-	op_fname(vm);
+	item_t* cache = &vm->cache.cfunc[cache_slot(vm)];
+	if (cache->type == SUBROUTINE || cache->type == CALLBACK) {
+		push(vm, *cache);
+	}
+	else {
+		op_fname(vm);
+		*cache = top(vm);
+	}
 	op_call(vm);
 }
 
@@ -3006,7 +3025,7 @@ func_t funcs[OPERATIONS] = {
 static void decompile(rela_vm* vm, code_t* c) {
 	char tmp[STRTMP];
 	const char *str = tmptext(vm, c->item, tmp, sizeof(tmp));
-	fprintf(stderr, "%04ld  %-10s  %s\n", c - vm->code.cells, funcs[c->op].name, str);
+	fprintf(stderr, "%04ld  %3d  %-10s  %s\n", c - vm->code.cells, c->cache, funcs[c->op].name, str);
 	fflush(stderr);
 }
 
@@ -3111,6 +3130,11 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 	memmove(&vm->stringsB, &vm->stringsA, sizeof(string_region_t));
 	memset(&vm->stringsA, 0, sizeof(string_region_t));
 
+	for (int i = 0, l = vm->code.depth; i < l; i++) {
+		code_t* code = &vm->code.cells[i];
+		if (code->op == OPP_CFUNC) code->cache = vm->cache.cfuncs++;
+	}
+
 	gc(vm);
 	return vm;
 }
@@ -3124,6 +3148,8 @@ int rela_run(rela_vm* vm) {
 }
 
 int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
+
+	vm->cache.cfunc = calloc(vm->cache.cfuncs, sizeof(item_t));
 
 	int wtf = setjmp(vm->jmp);
 	if (wtf) {

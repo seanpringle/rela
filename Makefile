@@ -1,18 +1,17 @@
 
 dev: LFLAGS=-lm -lpcre
-dev: CFLAGS=-Wall -Werror -O0 -g -std=c11 -DPCRE -DTRACE
+dev: CFLAGS=-Wall -Werror -Og -g -std=c11 -DPCRE
 dev: rela.o cli.o
+	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
+
+debug: LFLAGS=-lm -lpcre
+debug: CFLAGS=-Wall -Werror -O0 -g -std=c11 -DPCRE -DTRACE
+debug: rela.o cli.o
 	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
 
 rel: LFLAGS=-lm -lpcre
 rel: CFLAGS=-Wall -O3 -std=c11 -DNDEBUG -DPCRE -DPCRE_STUDY_JIT_COMPILE
 rel: rela.o cli.o
-	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
-	ar rcs librela.a rela.o
-
-lite: LFLAGS=-lm
-lite: CFLAGS=-Wall -Os -std=c11 -DNDEBUG
-lite: rela.o cli.o
 	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
 	ar rcs librela.a rela.o
 
