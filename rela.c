@@ -130,7 +130,6 @@ typedef struct _cor_t {
 	vec_t maps;   // map literals during construction
 	vec_t locals; // local variable key/val pairs
 	vec_t loops;  // loop state data
-	vec_t marks;  // mark/limits of stack subframes
 	vec_t paths;  // compile-time scope path
 	int ip;
 	int state;
@@ -139,6 +138,10 @@ typedef struct _cor_t {
 		int depth;
 		int limit;
 	} frames;
+	struct {
+		int cells[32];
+		int depth;
+	} marks;
 } cor_t; // coroutine
 
 typedef struct{
@@ -308,6 +311,7 @@ typedef struct _rela_vm {
 	// routines[0] == main coroutine, always set at run-time
 	// routines[1...n] resume/yield chain
 	vec_t routines;
+	cor_t* routine;
 
 	map_t* scope_core;
 	map_t* scope_global;
@@ -360,7 +364,6 @@ static item_t nil(rela_vm* vm);
 static bool equal(rela_vm* vm, item_t a, item_t b);
 static bool less(rela_vm* vm, item_t a, item_t b);
 static const char* tmptext(rela_vm* vm, item_t item, char* tmp, int size);
-static cor_t* routine(rela_vm* vm);
 static int parse(rela_vm* vm, const char *source, int results, int mode);
 static int parse_block(rela_vm* vm, const char *source, node_t *node);
 static int parse_branch(rela_vm* vm, const char *source, node_t *node);
@@ -445,7 +448,6 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	gc_mark_vec(vm, &cor->maps);
 	gc_mark_vec(vm, &cor->locals);
 	gc_mark_vec(vm, &cor->loops);
-	gc_mark_vec(vm, &cor->marks);
 	gc_mark_vec(vm, &cor->paths);
 }
 
@@ -496,7 +498,6 @@ static void gc(rela_vm* vm) {
 			free(cor->maps.items);
 			free(cor->locals.items);
 			free(cor->loops.items);
-			free(cor->marks.items);
 			free(cor->paths.items);
 			pool_free(&vm->cors, cor);
 		}
@@ -788,6 +789,7 @@ static int str_scan(const char *source, strcb cb) {
 static void reset(rela_vm* vm) {
 	vm->scope_global = NULL;
 	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
+	vm->routine = NULL;
 	free(vm->cache.cfunc);
 	vm->cache.cfunc = NULL;
 	gc(vm);
@@ -1038,16 +1040,19 @@ static int compile(rela_vm* vm, int op, item_t item) {
 	return vm->code.depth-1;
 }
 
-static cor_t* routine(rela_vm* vm) {
-	return vec_top(vm, &vm->routines).cor;
+static vec_t* stack(rela_vm* vm) {
+	return &vm->routine->stack;
 }
 
-static vec_t* stack(rela_vm* vm) {
-	return &routine(vm)->stack;
+static item_t* stack_cell(rela_vm* vm, int index) {
+	vec_t* stk = stack(vm);
+	if (index < 0) index = stk->count + index;
+	assert(index >= 0 && index < stk->count);
+	return &stk->items[index];
 }
 
 static int depth(rela_vm* vm) {
-	int base = vec_size(vm, &routine(vm)->marks) ? vec_cell(vm, &routine(vm)->marks, -1)->inum: 0;
+	int base = vm->routine->marks.depth ? vm->routine->marks.cells[vm->routine->marks.depth-1]: 0;
 	return vec_size(vm, stack(vm)) - base;
 }
 
@@ -1064,7 +1069,7 @@ static item_t top(rela_vm* vm) {
 }
 
 static item_t* item(rela_vm* vm, int i) {
-	int base = vec_cell(vm, &routine(vm)->marks, -1)->inum;
+	int base = vm->routine->marks.cells[vm->routine->marks.depth-1];
 	return vec_cell(vm, stack(vm), i >= 0 ? base+i: i);
 }
 
@@ -2128,7 +2133,7 @@ static void source(rela_vm* vm, const char *source) {
 }
 
 static item_t literal(rela_vm* vm) {
-	return vm->code.cells[routine(vm)->ip-1].item;
+	return vm->code.cells[vm->routine->ip-1].item;
 }
 
 static int64_t literal_int(rela_vm* vm) {
@@ -2137,7 +2142,7 @@ static int64_t literal_int(rela_vm* vm) {
 }
 
 static int cache_slot(rela_vm* vm) {
-	return vm->code.cells[routine(vm)->ip-1].cache;
+	return vm->code.cells[vm->routine->ip-1].cache;
 }
 
 static void op_stop (rela_vm* vm) {
@@ -2163,23 +2168,23 @@ static void op_clean(rela_vm* vm) {
 }
 
 static void op_map(rela_vm* vm) {
-	vec_push(vm, &routine(vm)->maps, (item_t){.type = MAP, .map = map_allot(vm)});
+	vec_push(vm, &vm->routine->maps, (item_t){.type = MAP, .map = map_allot(vm)});
 }
 
 static void op_unmap(rela_vm* vm) {
-	push(vm, (item_t){.type = MAP, .map = vec_pop(vm, &routine(vm)->maps).map});
+	push(vm, (item_t){.type = MAP, .map = vec_pop(vm, &vm->routine->maps).map});
 }
 
 static void op_mark(rela_vm* vm) {
-	vec_push(vm, &routine(vm)->marks, integer(vm, vec_size(vm, stack(vm))));
+	vm->routine->marks.cells[vm->routine->marks.depth++] = vec_size(vm, stack(vm));
 }
 
 static void op_unmark(rela_vm* vm) {
-	vec_pop(vm, &routine(vm)->marks);
+	vm->routine->marks.depth--;
 }
 
 static void limit(rela_vm* vm, int count) {
-	int old_depth = vec_pop(vm, &routine(vm)->marks).inum;
+	int old_depth = vm->routine->marks.cells[--vm->routine->marks.depth];
 	int req_depth = old_depth + count;
 	if (count >= 0) {
 		while (req_depth < vec_size(vm, stack(vm))) pop(vm);
@@ -2191,15 +2196,8 @@ static void op_limit(rela_vm* vm) {
 	limit(vm, literal_int(vm));
 }
 
-#define FRAME 5
-#define LOCALS 0
-#define PATHS 1
-#define LOOPS 2
-#define MARKS 3
-#define IP 4
-
 static void arrive(rela_vm* vm, int ip) {
-	cor_t* cor = routine(vm);
+	cor_t* cor = vm->routine;
 
 	if (cor->frames.depth == cor->frames.limit) {
 		cor->frames.limit += 32;
@@ -2210,7 +2208,7 @@ static void arrive(rela_vm* vm, int ip) {
 	frame->locals = vec_size(vm, &cor->locals);
 	frame->paths = vec_size(vm, &cor->paths);
 	frame->loops = vec_size(vm, &cor->loops);
-	frame->marks = vec_size(vm, &cor->marks);
+	frame->marks = cor->marks.depth;
 	frame->ip = cor->ip;
 
 	frame->maps = vec_size(vm, &cor->maps);
@@ -2221,11 +2219,11 @@ static void arrive(rela_vm* vm, int ip) {
 }
 
 static void depart(rela_vm* vm) {
-	cor_t* cor = routine(vm);
+	cor_t* cor = vm->routine;
 
 	frame_t* frame = &cor->frames.cells[--cor->frames.depth];
 	cor->ip = frame->ip;
-	vec_shrink(vm, &cor->marks, frame->marks);
+	cor->marks.depth = frame->marks;
 	vec_shrink(vm, &cor->loops, frame->loops);
 	vec_shrink(vm, &cor->paths, frame->paths);
 	vec_shrink(vm, &cor->locals, frame->locals);
@@ -2241,9 +2239,10 @@ static void op_coroutine(rela_vm* vm) {
 
 	int ip = item(vm, 0)->sub;
 
-	cor->state = COR_RUNNING;
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
+	vm->routine = cor;
 
+	cor->state = COR_RUNNING;
 	arrive(vm, ip);
 	op_mark(vm);
 
@@ -2253,9 +2252,10 @@ static void op_coroutine(rela_vm* vm) {
 		vec_push(vm, &cor->stack, *item(vm, i));
 
 	op_clean(vm);
+	cor->state = COR_SUSPENDED;
 
 	vec_pop(vm, &vm->routines);
-	cor->state = COR_SUSPENDED;
+	vm->routine = vec_top(vm, &vm->routines).cor;
 
 	op_clean(vm);
 
@@ -2283,14 +2283,16 @@ static void op_resume(rela_vm* vm) {
 		pop(vm);
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
+	vm->routine = cor;
 }
 
 static void op_yield(rela_vm* vm) {
 	int items = depth(vm);
 
-	cor_t *src = routine(vm);
+	cor_t *src = vm->routine;
 	vec_pop(vm, &vm->routines);
-	cor_t *dst = routine(vm);
+	vm->routine = vec_top(vm, &vm->routines).cor;
+	cor_t *dst = vm->routine;
 
 	for (int i = 0; i < items; i++)
 		push(vm, vec_get(vm, &src->stack, vec_size(vm, &src->stack) - items + i));
@@ -2299,16 +2301,14 @@ static void op_yield(rela_vm* vm) {
 		vec_pop(vm, &src->stack);
 
 	src->state = COR_SUSPENDED;
-	vec_cell(vm, &dst->marks, -1)->inum += items;
+	dst->marks.depth += items;
 }
 
 static void op_global(rela_vm* vm) {
 	push(vm, (item_t){.type = MAP, .map = vm->scope_global});
 }
 
-static void op_call(rela_vm* vm) {
-	item_t item = pop(vm);
-
+static void call(rela_vm* vm, item_t item) {
 	if (item.type == CALLBACK) {
 		item.cb((rela_vm*)vm);
 		return;
@@ -2317,7 +2317,7 @@ static void op_call(rela_vm* vm) {
 	int args = depth(vm);
 
 	char tmp[STRTMP];
-	ensure(vm, item.type == SUBROUTINE, "invalid function: %s (ip: %u)", tmptext(vm, item, tmp, sizeof(tmp)), routine(vm)->ip);
+	ensure(vm, item.type == SUBROUTINE, "invalid function: %s (ip: %u)", tmptext(vm, item, tmp, sizeof(tmp)), vm->routine->ip);
 
 	arrive(vm, item.sub);
 
@@ -2325,11 +2325,15 @@ static void op_call(rela_vm* vm) {
 	// subroutines need to know the base of their subframe,
 	// which is the same as the current depth of the outer
 	// frame mark
-	vec_cell(vm, &routine(vm)->marks, -1)->inum -= args;
+	vm->routine->marks.cells[vm->routine->marks.depth-1] -= args;
+}
+
+static void op_call(rela_vm* vm) {
+	call(vm, pop(vm));
 }
 
 static void op_return(rela_vm* vm) {
-	cor_t* cor = routine(vm);
+	cor_t* cor = vm->routine;
 
 	// subroutines leave only results in their subframe, which
 	// migrate to the caller frame when depart() truncates the
@@ -2352,35 +2356,33 @@ static void op_lit(rela_vm* vm) {
 }
 
 static void op_loop(rela_vm* vm) {
-	vec_push(vm, &routine(vm)->loops, integer(vm, vec_size(vm, &routine(vm)->marks)));
-	vec_push(vm, &routine(vm)->loops, integer(vm, literal_int(vm)));
+	vec_push(vm, &vm->routine->loops, integer(vm, vm->routine->marks.depth));
+	vec_push(vm, &vm->routine->loops, integer(vm, literal_int(vm)));
 }
 
 static void op_unloop(rela_vm* vm) {
-	vec_pop(vm, &routine(vm)->loops);
-	ensure(vm, vec_pop(vm, &routine(vm)->loops).inum == vec_size(vm, &routine(vm)->marks), "mark stack mismatch (unloop)");
+	vec_pop(vm, &vm->routine->loops);
+	ensure(vm, vec_pop(vm, &vm->routine->loops).inum == vm->routine->marks.depth, "mark stack mismatch (unloop)");
 }
 
 static void op_break(rela_vm* vm) {
-	routine(vm)->ip = vec_cell(vm, &routine(vm)->loops, -1)->inum;
-	while (vec_size(vm, &routine(vm)->marks) > vec_cell(vm, &routine(vm)->loops, -FRAME+MARKS)->inum)
-		vec_pop(vm, &routine(vm)->marks);
+	vm->routine->ip = vec_cell(vm, &vm->routine->loops, -1)->inum;
+	vm->routine->marks.depth = vec_cell(vm, &vm->routine->loops, -2)->inum;
 	while (depth(vm)) pop(vm);
 }
 
 static void op_continue(rela_vm* vm) {
-	routine(vm)->ip = vec_cell(vm, &routine(vm)->loops, -1)->inum-1;
-	while (vec_size(vm, &routine(vm)->marks) > vec_cell(vm, &routine(vm)->loops, -FRAME+MARKS)->inum)
-		vec_pop(vm, &routine(vm)->marks);
+	vm->routine->ip = vec_cell(vm, &vm->routine->loops, -1)->inum-1;
+	vm->routine->marks.depth = vec_cell(vm, &vm->routine->loops, -2)->inum;
 	while (depth(vm)) pop(vm);
 }
 
 static void op_shunt(rela_vm* vm) {
-	vec_push(vm, &routine(vm)->other, pop(vm));
+	vec_push(vm, &vm->routine->other, pop(vm));
 }
 
 static void op_shift(rela_vm* vm) {
-	push(vm, vec_pop(vm, &routine(vm)->other));
+	push(vm, vec_pop(vm, &vm->routine->other));
 }
 
 static void op_nil(rela_vm* vm) {
@@ -2396,7 +2398,7 @@ static void op_false(rela_vm* vm) {
 }
 
 static void op_jmp(rela_vm* vm) {
-	routine(vm)->ip = literal_int(vm);
+	vm->routine->ip = literal_int(vm);
 }
 
 static void op_jfalse(rela_vm* vm) {
@@ -2429,7 +2431,7 @@ static void op_unpack(rela_vm* vm) {
 }
 
 static void op_pid(rela_vm* vm) {
-	vec_push(vm, &routine(vm)->paths, literal(vm));
+	vec_push(vm, &vm->routine->paths, literal(vm));
 }
 
 static void op_type(rela_vm* vm) {
@@ -2437,11 +2439,12 @@ static void op_type(rela_vm* vm) {
 	push(vm, string(vm, type_names[a.type]));
 }
 
+// locate a local variable cell in the current frame
 static item_t* local(rela_vm* vm, item_t key) {
-	cor_t* cor = routine(vm);
+	cor_t* cor = vm->routine;
 	if (!cor->frames.depth) return NULL;
 	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
-	// locate a local variable cell in the current frame
+
 	for (int cell = frame->locals, last = vec_size(vm, &cor->locals); cell < last; cell += 2) {
 		if (equal(vm, vec_get(vm, &cor->locals, cell), key)) {
 			return vec_cell(vm, &cor->locals, cell+1);
@@ -2450,8 +2453,9 @@ static item_t* local(rela_vm* vm, item_t key) {
 	return NULL;
 }
 
+// locate a local variable cell in an outer frame
 static item_t* uplocal(rela_vm* vm, item_t key) {
-	cor_t* cor = routine(vm);
+	cor_t* cor = vm->routine;
 	if (cor->frames.depth < 2) return NULL;
 
 	int index = cor->frames.depth;
@@ -2485,10 +2489,10 @@ static item_t* uplocal(rela_vm* vm, item_t key) {
 }
 
 static void assign(rela_vm* vm, item_t key, item_t val) {
-	cor_t* cor = routine(vm);
+	cor_t* cor = vm->routine;
 
 	// OP_ASSIGN is used for too many things: local variables, map literal keys, global keys
-	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
+	map_t* map = vec_size(vm, &vm->routine->maps) ? vec_top(vm, &vm->routine->maps).map: NULL;
 
 	if (!map && cor->frames.depth) {
 		item_t* cell = local(vm, key);
@@ -2554,7 +2558,7 @@ static void op_for(rela_vm* vm) {
 		int step = item.inum;
 
 		if (step == iter.inum) {
-			routine(vm)->ip = quit;
+			vm->routine->ip = quit;
 		}
 		else {
 			if (vec_size(vm, vars) > 2)
@@ -2569,7 +2573,7 @@ static void op_for(rela_vm* vm) {
 		int step = item.inum;
 
 		if (step >= vec_size(vm, iter.vec)) {
-			routine(vm)->ip = quit;
+			vm->routine->ip = quit;
 		}
 		else {
 			if (vec_size(vm, vars) > 2)
@@ -2584,7 +2588,7 @@ static void op_for(rela_vm* vm) {
 		int step = item.inum;
 
 		if (step >= vec_size(vm, &iter.map->keys)) {
-			routine(vm)->ip = quit;
+			vm->routine->ip = quit;
 		}
 		else {
 			if (vec_size(vm, vars) > 2)
@@ -2595,7 +2599,7 @@ static void op_for(rela_vm* vm) {
 		}
 	}
 	else {
-		routine(vm)->ip = quit;
+		vm->routine->ip = quit;
 	}
 }
 
@@ -2652,15 +2656,17 @@ static item_t get(rela_vm* vm, item_t src, item_t key) {
 }
 
 static void op_get(rela_vm* vm) {
-	item_t key = pop(vm);
-	item_t src = pop(vm);
-	push(vm, get(vm, src, key));
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = get(vm, *a, *b);
+	op_drop(vm);
 }
 
 static void op_add(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, add(vm, a, b));
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = add(vm, *a, *b);
+	op_drop(vm);
 }
 
 static void op_neg(rela_vm* vm) {
@@ -2683,27 +2689,31 @@ static void op_sub(rela_vm* vm) {
 }
 
 static void op_mul(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, multiply(vm, a, b));
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = multiply(vm, *a, *b);
+	op_drop(vm);
 }
 
 static void op_div(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, divide(vm, a, b));
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = divide(vm, *a, *b);
+	op_drop(vm);
 }
 
 static void op_mod(rela_vm* vm) {
-	item_t b = pop_type(vm, INTEGER);
-	item_t a = pop_type(vm, INTEGER);
-	push(vm, (item_t){.type = INTEGER, .inum = a.inum % b.inum});
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = (item_t){.type = INTEGER, .inum = a->inum % b->inum};
+	op_drop(vm);
 }
 
 static void op_eq(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, (item_t){.type = BOOLEAN, .flag = equal(vm, a, b)});
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = (item_t){.type = BOOLEAN, .flag = equal(vm, *a, *b)};
+	op_drop(vm);
 }
 
 static void op_not(rela_vm* vm) {
@@ -2716,27 +2726,31 @@ static void op_ne(rela_vm* vm) {
 }
 
 static void op_lt(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, (item_t){.type = BOOLEAN, .flag = less(vm, a, b)});
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = (item_t){.type = BOOLEAN, .flag = less(vm, *a, *b)};
+	op_drop(vm);
 }
 
 static void op_gt(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, (item_t){.type = BOOLEAN, .flag = !less(vm, a, b) && !equal(vm, a, b)});
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = (item_t){.type = BOOLEAN, .flag = !less(vm, *a, *b) && !equal(vm, *a, *b)};
+	op_drop(vm);
 }
 
 static void op_lte(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, (item_t){.type = BOOLEAN, .flag = less(vm, a, b) || equal(vm, a, b)});
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = (item_t){.type = BOOLEAN, .flag = less(vm, *a, *b) || equal(vm, *a, *b)};
+	op_drop(vm);
 }
 
 static void op_gte(rela_vm* vm) {
-	item_t b = pop(vm);
-	item_t a = pop(vm);
-	push(vm, (item_t){.type = BOOLEAN, .flag = !less(vm, a, b)});
+	item_t* b = stack_cell(vm, -1);
+	item_t* a = stack_cell(vm, -2);
+	*a = (item_t){.type = BOOLEAN, .flag = !less(vm, *a, *b)};
+	op_drop(vm);
 }
 
 static void op_concat(rela_vm* vm) {
@@ -2905,13 +2919,13 @@ static void op_gname(rela_vm* vm) {
 static void op_cfunc(rela_vm* vm) {
 	item_t* cache = &vm->cache.cfunc[cache_slot(vm)];
 	if (cache->type == SUBROUTINE || cache->type == CALLBACK) {
-		push(vm, *cache);
+		call(vm, *cache);
 	}
 	else {
 		op_fname(vm);
 		*cache = top(vm);
+		op_call(vm);
 	}
-	op_call(vm);
 }
 
 // compression of mark,lit,lit,assign,limit0
@@ -3126,6 +3140,7 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 	}
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_allot(vm)});
+	vm->routine = vec_top(vm, &vm->routines).cor;
 	op_mark(vm);
 
 	for (int i = 0, l = modules; i < l; i++) {
@@ -3138,6 +3153,7 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 
 	op_unmark(vm);
 	vec_pop(vm, &vm->routines);
+	vm->routine = NULL;
 
 	while (vm->nodes.cells && vm->nodes.depth > 0)
 		free(vm->nodes.cells[--vm->nodes.depth]);
@@ -3172,7 +3188,7 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	if (wtf) {
 		char tmp[STRTMP];
 		fprintf(stderr, "%s (", vm->err);
-		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? routine(vm)->ip: -1);
+		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? vm->routine->ip: -1);
 		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
 		fprintf(stderr, ")\n");
 		reset(vm);
@@ -3180,14 +3196,15 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	}
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor_allot(vm)});
+	vm->routine = vec_top(vm, &vm->routines).cor;
 	vm->scope_global = map_allot(vm);
 
 	for (int mod = 0; mod < modules; mod++) {
 		ensure(vm, modlist[mod] < vec_size(vm, &vm->modules.entries), "invalid module %d", modlist[mod]);
-		routine(vm)->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
+		vm->routine->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
 
 		for (;;) {
-			int ip = routine(vm)->ip++;
+			int ip = vm->routine->ip++;
 			assert(ip >= 0 && ip < vm->code.depth);
 			int opcode = vm->code.cells[ip].op;
 			if (opcode == OP_STOP) break;
@@ -3196,7 +3213,7 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 				code_t* c = &vm->code.cells[ip];
 				char tmpA[STRTMP];
 				const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
-				for (int i = 0, l = vec_size(vm, &routine(vm)->marks); i < l; i++)
+				for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
 					fprintf(stderr, "  ");
 				fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
 				fflush(stderr);
