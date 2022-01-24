@@ -115,17 +115,30 @@ typedef struct _map_t {
 	vec_t vals;
 } map_t;
 
+typedef struct {
+	int locals;
+	int paths;
+	int loops;
+	int marks;
+	int ip;
+	int maps;
+} frame_t;
+
 typedef struct _cor_t {
 	vec_t stack;  // arguments, results, opcode working
 	vec_t other;  // temporary data moved off stack
 	vec_t maps;   // map literals during construction
 	vec_t locals; // local variable key/val pairs
-	vec_t calls;  // call/return stack frames
 	vec_t loops;  // loop state data
 	vec_t marks;  // mark/limits of stack subframes
 	vec_t paths;  // compile-time scope path
 	int ip;
 	int state;
+	struct {
+		frame_t* cells;
+		int depth;
+		int limit;
+	} frames;
 } cor_t; // coroutine
 
 typedef struct{
@@ -431,7 +444,6 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	gc_mark_vec(vm, &cor->other);
 	gc_mark_vec(vm, &cor->maps);
 	gc_mark_vec(vm, &cor->locals);
-	gc_mark_vec(vm, &cor->calls);
 	gc_mark_vec(vm, &cor->loops);
 	gc_mark_vec(vm, &cor->marks);
 	gc_mark_vec(vm, &cor->paths);
@@ -483,7 +495,6 @@ static void gc(rela_vm* vm) {
 			free(cor->other.items);
 			free(cor->maps.items);
 			free(cor->locals.items);
-			free(cor->calls.items);
 			free(cor->loops.items);
 			free(cor->marks.items);
 			free(cor->paths.items);
@@ -2190,31 +2201,36 @@ static void op_limit(rela_vm* vm) {
 static void arrive(rela_vm* vm, int ip) {
 	cor_t* cor = routine(vm);
 
-	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->locals)));
-	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->paths)));
-	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->loops)));
-	vec_push(vm, &cor->calls, integer(vm, vec_size(vm, &cor->marks)));
-	vec_push(vm, &cor->calls, integer(vm, cor->ip));
+	if (cor->frames.depth == cor->frames.limit) {
+		cor->frames.limit += 32;
+		cor->frames.cells = realloc(cor->frames.cells, sizeof(frame_t) * cor->frames.limit);
+	}
+
+	frame_t* frame = &cor->frames.cells[cor->frames.depth++];
+	frame->locals = vec_size(vm, &cor->locals);
+	frame->paths = vec_size(vm, &cor->paths);
+	frame->loops = vec_size(vm, &cor->loops);
+	frame->marks = vec_size(vm, &cor->marks);
+	frame->ip = cor->ip;
+
+	frame->maps = vec_size(vm, &cor->maps);
+	for (int i = 0, l = frame->maps; i < l; i++)
+		vec_push(vm, &cor->other, vec_pop(vm, &cor->maps));
 
 	cor->ip = ip;
-
-	int maps = vec_size(vm, &cor->maps);
-	for (int i = 0, l = maps; i < l; i++)
-		vec_push(vm, &cor->other, vec_pop(vm, &cor->maps));
-	vec_push(vm, &cor->other, integer(vm, maps));
 }
 
 static void depart(rela_vm* vm) {
 	cor_t* cor = routine(vm);
 
-	cor->ip = vec_pop(vm, &cor->calls).inum;
-	vec_shrink(vm, &cor->marks, vec_pop(vm, &cor->calls).inum);
-	vec_shrink(vm, &cor->loops, vec_pop(vm, &cor->calls).inum);
-	vec_shrink(vm, &cor->paths, vec_pop(vm, &cor->calls).inum);
-	vec_shrink(vm, &cor->locals, vec_pop(vm, &cor->calls).inum);
+	frame_t* frame = &cor->frames.cells[--cor->frames.depth];
+	cor->ip = frame->ip;
+	vec_shrink(vm, &cor->marks, frame->marks);
+	vec_shrink(vm, &cor->loops, frame->loops);
+	vec_shrink(vm, &cor->paths, frame->paths);
+	vec_shrink(vm, &cor->locals, frame->locals);
 
-	int maps = vec_pop(vm, &cor->other).inum;
-	for (int i = 0, l = maps; i < l; i++)
+	for (int i = 0, l = frame->maps; i < l; i++)
 		vec_push(vm, &cor->maps, vec_pop(vm, &cor->other));
 }
 
@@ -2423,54 +2439,47 @@ static void op_type(rela_vm* vm) {
 
 static item_t* local(rela_vm* vm, item_t key) {
 	cor_t* cor = routine(vm);
-	if (!vec_size(vm, &cor->calls)) return NULL;
+	if (!cor->frames.depth) return NULL;
+	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
 	// locate a local variable cell in the current frame
-	int frame = vec_size(vm, &cor->calls)-FRAME;
-	int cell = vec_cell(vm, &cor->calls, frame)->inum;
-	int last = vec_size(vm, &cor->locals);
-	while (cell < last) {
+	for (int cell = frame->locals, last = vec_size(vm, &cor->locals); cell < last; cell += 2) {
 		if (equal(vm, vec_get(vm, &cor->locals, cell), key)) {
 			return vec_cell(vm, &cor->locals, cell+1);
 		}
-		cell += 2;
 	}
 	return NULL;
 }
 
 static item_t* uplocal(rela_vm* vm, item_t key) {
 	cor_t* cor = routine(vm);
-	if (vec_size(vm, &cor->calls) <= FRAME) return NULL;
+	if (cor->frames.depth < 2) return NULL;
 
-	int frame_last = vec_size(vm, &cor->calls)-FRAME;
-	int frame = frame_last-FRAME;
+	int index = cor->frames.depth;
+	frame_t* lframe = &cor->frames.cells[--index];
 
-	int pids_base = vec_cell(vm, &cor->calls, frame+PATHS)->inum;
-	item_t* pids = vec_cell(vm, &cor->paths, pids_base);
-
-	int depth = vec_size(vm, &cor->paths) - pids_base;
+	item_t* pids = vec_cell(vm, &cor->paths, lframe->paths);
+	int depth = vec_size(vm, &cor->paths) - lframe->paths;
 	assert(depth >= 1);
 
-	while (depth > 1 && frame >= 0) {
-		int paths_base = vec_cell(vm, &cor->calls, frame+PATHS)->inum;
-		int pid = vec_cell(vm, &cor->paths, paths_base)->inum;
+	while (depth > 1 && index > 0) {
+		frame_t* nframe = &cor->frames.cells[index];
+		frame_t* uframe = &cor->frames.cells[--index];
+
+		int pid = vec_cell(vm, &cor->paths, uframe->paths)->inum;
 
 		// i=1 to skip checking outer recursive calls to current function
 		for (int i = 1, l = depth; i < l; i++) {
 			// only check this call stack frame if it belongs to another
 			// function from the current function's compile-time scope chain
 			if (pid == pids[i].inum) {
-				int cell = vec_cell(vm, &cor->calls, frame)->inum;
-				int last = vec_cell(vm, &cor->calls, frame+FRAME)->inum;
-				while (cell < last) {
+				for (int cell = uframe->locals, last = nframe->locals; cell < last; cell += 2) {
 					if (equal(vm, vec_get(vm, &cor->locals, cell), key)) {
 						return vec_cell(vm, &cor->locals, cell+1);
 					}
-					cell += 2;
 				}
 				break;
 			}
 		}
-		frame -= FRAME;
 	}
 	return NULL;
 }
@@ -2481,7 +2490,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	// OP_ASSIGN is used for too many things: local variables, map literal keys, global keys
 	map_t* map = vec_size(vm, &routine(vm)->maps) ? vec_top(vm, &routine(vm)->maps).map: NULL;
 
-	if (!map && vec_size(vm, &cor->calls)) {
+	if (!map && cor->frames.depth) {
 		item_t* cell = local(vm, key);
 		if (cell) *cell = val;
 		else {
