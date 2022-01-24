@@ -107,6 +107,7 @@ typedef struct {
 typedef struct _vec_t {
 	item_t* items;
 	int count;
+	int buffer;
 } vec_t; // vector
 
 typedef struct _map_t {
@@ -520,31 +521,25 @@ static size_t vec_size(rela_vm* vm, vec_t* vec) {
 }
 
 static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
-	ensure(vm, index >= 0 && index <= vec->count, "vec_ins out of bounds");
+	assert(index >= 0 && index <= vec->count);
+	assert(vec->count <= vec->buffer);
 
-	if (!vec->items) {
-		assert(vec->count == 0);
-		vec->items = malloc(sizeof(item_t) * 8);
+	if (!vec->items || vec->count == vec->buffer) {
+		vec->buffer = vec->buffer ? vec->buffer*2: 8;
+		vec->items = realloc(vec->items, sizeof(item_t) * vec->buffer);
 	}
 
+	if (index < vec->count)
+		memmove(&vec->items[index+1], &vec->items[index], (vec->count - index) * sizeof(item_t));
+
 	vec->count++;
-
-	int size = vec->count;
-	bool power_of_2 = size > 0 && (size & (size - 1)) == 0;
-
-	if (power_of_2 && size >= 8)
-		vec->items = realloc(vec->items, sizeof(item_t) * (size * 2));
-
-	if (index < vec->count-1)
-		memmove(&vec->items[index+1], &vec->items[index], (vec->count - index - 1) * sizeof(item_t));
-
 	vec->items[index].type = NIL;
 
 	return &vec->items[index];
 }
 
 static void vec_del(rela_vm* vm, vec_t* vec, int index) {
-	ensure(vm, index >= 0 && index < vec->count, "vec_del out of bounds");
+	assert(index >= 0 && index < vec->count);
 	memmove(&vec->items[index], &vec->items[index+1], (vec->count - index - 1) * sizeof(item_t));
 	vec->count--;
 }
