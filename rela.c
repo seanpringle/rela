@@ -129,19 +129,24 @@ typedef struct _cor_t {
 	vec_t other;  // temporary data moved off stack
 	vec_t maps;   // map literals during construction
 	vec_t locals; // local variable key/val pairs
-	vec_t loops;  // loop state data
-	vec_t paths;  // compile-time scope path
 	int ip;
 	int state;
 	struct {
-		frame_t* cells;
+		frame_t cells[32];
 		int depth;
-		int limit;
 	} frames;
 	struct {
 		int cells[32];
 		int depth;
 	} marks;
+	struct {
+		int cells[32];
+		int depth;
+	} paths;
+	struct {
+		int cells[32];
+		int depth;
+	} loops;
 } cor_t; // coroutine
 
 typedef struct{
@@ -447,8 +452,6 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	gc_mark_vec(vm, &cor->other);
 	gc_mark_vec(vm, &cor->maps);
 	gc_mark_vec(vm, &cor->locals);
-	gc_mark_vec(vm, &cor->loops);
-	gc_mark_vec(vm, &cor->paths);
 }
 
 // A naive mark-and-sweep collector that is never called implicitly
@@ -497,8 +500,6 @@ static void gc(rela_vm* vm) {
 			free(cor->other.items);
 			free(cor->maps.items);
 			free(cor->locals.items);
-			free(cor->loops.items);
-			free(cor->paths.items);
 			pool_free(&vm->cors, cor);
 		}
 	}
@@ -812,26 +813,30 @@ static item_t string(rela_vm* vm, const char* s) {
 }
 
 static bool equal(rela_vm* vm, item_t a, item_t b) {
-	if (a.type == b.type && a.type == INTEGER) return a.inum == b.inum;
-	if (a.type == b.type && a.type == FLOAT) return fabs(a.fnum - b.fnum) < DBL_EPSILON*10;
-	if (a.type == b.type && a.type == STRING) return a.str == b.str; // .str must use strintern
-	if (a.type == b.type && a.type == BOOLEAN) return a.flag == b.flag;
-	if (a.type == b.type && a.type == VECTOR) return a.vec == b.vec;
-	if (a.type == b.type && a.type == MAP) return a.map == b.map;
-	if (a.type == b.type && a.type == SUBROUTINE) return a.sub == b.sub;
-	if (a.type == b.type && a.type == COROUTINE) return a.cor == b.cor;
-	if (a.type == b.type && a.type == USERDATA) return a.data == b.data;
-	if (a.type == b.type && a.type == NODE) return a.node == b.node;
-	if (a.type == b.type && a.type == NIL) return true;
+	if (a.type == b.type) {
+		if (a.type == INTEGER) return a.inum == b.inum;
+		if (a.type == FLOAT) return fabs(a.fnum - b.fnum) < DBL_EPSILON*10;
+		if (a.type == STRING) return a.str == b.str; // .str must use strintern
+		if (a.type == BOOLEAN) return a.flag == b.flag;
+		if (a.type == VECTOR) return a.vec == b.vec;
+		if (a.type == MAP) return a.map == b.map;
+		if (a.type == SUBROUTINE) return a.sub == b.sub;
+		if (a.type == COROUTINE) return a.cor == b.cor;
+		if (a.type == USERDATA) return a.data == b.data;
+		if (a.type == NODE) return a.node == b.node;
+		if (a.type == NIL) return true;
+	}
 	return false;
 }
 
 static bool less(rela_vm* vm, item_t a, item_t b) {
-	if (a.type == b.type && a.type == INTEGER) return a.inum < b.inum;
-	if (a.type == b.type && a.type == FLOAT) return a.fnum < b.fnum;
-	if (a.type == b.type && a.type == STRING) return a.str != b.str && strcmp(a.str, b.str) < 0;
-	if (a.type == b.type && a.type == VECTOR) return vec_size(vm, a.vec) < vec_size(vm, b.vec);
-	if (a.type == b.type && a.type == MAP) return vec_size(vm, &a.map->keys) < vec_size(vm, &b.map->keys);
+	if (a.type == b.type) {
+		if (a.type == INTEGER) return a.inum < b.inum;
+		if (a.type == FLOAT) return a.fnum < b.fnum;
+		if (a.type == STRING) return a.str != b.str && strcmp(a.str, b.str) < 0;
+		if (a.type == VECTOR) return vec_size(vm, a.vec) < vec_size(vm, b.vec);
+		if (a.type == MAP) return vec_size(vm, &a.map->keys) < vec_size(vm, &b.map->keys);
+	}
 	return false;
 }
 
@@ -2051,8 +2056,8 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		if (node->args)
 			process(vm, node->args, 0, 0);
 
-		// loop counter
-		compile(vm, OP_LIT, integer(vm, 0));
+//		// loop counter
+//		compile(vm, OP_LIT, integer(vm, 0));
 
 		compile(vm, OP_MARK, nil(vm));
 		int loop = compile(vm, OP_LOOP, nil(vm));
@@ -2069,7 +2074,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
-		vec_push_allot(vm, &node->keys, integer(vm, vm->code.depth));
+//		vec_push_allot(vm, &node->keys, integer(vm, vm->code.depth));
 		compiled(vm, loop)->item = integer(vm, vm->code.depth);
 		compile(vm, OP_UNLOOP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 0));
@@ -2176,14 +2181,17 @@ static void op_unmap(rela_vm* vm) {
 }
 
 static void op_mark(rela_vm* vm) {
+	assert(vm->routine->marks.depth < sizeof(vm->routine->marks.cells)/sizeof(int));
 	vm->routine->marks.cells[vm->routine->marks.depth++] = vec_size(vm, stack(vm));
 }
 
 static void op_unmark(rela_vm* vm) {
+	assert(vm->routine->marks.depth > 0);
 	vm->routine->marks.depth--;
 }
 
 static void limit(rela_vm* vm, int count) {
+	assert(vm->routine->marks.depth > 0);
 	int old_depth = vm->routine->marks.cells[--vm->routine->marks.depth];
 	int req_depth = old_depth + count;
 	if (count >= 0) {
@@ -2199,15 +2207,12 @@ static void op_limit(rela_vm* vm) {
 static void arrive(rela_vm* vm, int ip) {
 	cor_t* cor = vm->routine;
 
-	if (cor->frames.depth == cor->frames.limit) {
-		cor->frames.limit += 32;
-		cor->frames.cells = realloc(cor->frames.cells, sizeof(frame_t) * cor->frames.limit);
-	}
-
+	assert(cor->frames.depth < sizeof(cor->frames.cells)/sizeof(frame_t));
 	frame_t* frame = &cor->frames.cells[cor->frames.depth++];
+
 	frame->locals = vec_size(vm, &cor->locals);
-	frame->paths = vec_size(vm, &cor->paths);
-	frame->loops = vec_size(vm, &cor->loops);
+	frame->paths = cor->paths.depth;
+	frame->loops = cor->loops.depth;
 	frame->marks = cor->marks.depth;
 	frame->ip = cor->ip;
 
@@ -2221,11 +2226,13 @@ static void arrive(rela_vm* vm, int ip) {
 static void depart(rela_vm* vm) {
 	cor_t* cor = vm->routine;
 
+	assert(cor->frames.depth > 0);
 	frame_t* frame = &cor->frames.cells[--cor->frames.depth];
+
 	cor->ip = frame->ip;
 	cor->marks.depth = frame->marks;
-	vec_shrink(vm, &cor->loops, frame->loops);
-	vec_shrink(vm, &cor->paths, frame->paths);
+	cor->loops.depth = frame->loops;
+	cor->paths.depth = frame->paths;
 	vec_shrink(vm, &cor->locals, frame->locals);
 
 	for (int i = 0, l = frame->maps; i < l; i++)
@@ -2356,24 +2363,28 @@ static void op_lit(rela_vm* vm) {
 }
 
 static void op_loop(rela_vm* vm) {
-	vec_push(vm, &vm->routine->loops, integer(vm, vm->routine->marks.depth));
-	vec_push(vm, &vm->routine->loops, integer(vm, literal_int(vm)));
+	assert(vm->routine->loops.depth+2 < sizeof(vm->routine->loops.cells)/sizeof(int));
+	vm->routine->loops.cells[vm->routine->loops.depth++] = vm->routine->marks.depth;
+	vm->routine->loops.cells[vm->routine->loops.depth++] = literal_int(vm);
+	vm->routine->loops.cells[vm->routine->loops.depth++] = 0;
 }
 
 static void op_unloop(rela_vm* vm) {
-	vec_pop(vm, &vm->routine->loops);
-	ensure(vm, vec_pop(vm, &vm->routine->loops).inum == vm->routine->marks.depth, "mark stack mismatch (unloop)");
+	assert(vm->routine->loops.depth > 1);
+	--vm->routine->loops.depth;
+	--vm->routine->loops.depth;
+	ensure(vm, vm->routine->loops.cells[--vm->routine->loops.depth] == vm->routine->marks.depth, "mark stack mismatch (unloop)");
 }
 
 static void op_break(rela_vm* vm) {
-	vm->routine->ip = vec_cell(vm, &vm->routine->loops, -1)->inum;
-	vm->routine->marks.depth = vec_cell(vm, &vm->routine->loops, -2)->inum;
+	vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+	vm->routine->marks.depth = vm->routine->loops.cells[vm->routine->loops.depth-3];
 	while (depth(vm)) pop(vm);
 }
 
 static void op_continue(rela_vm* vm) {
-	vm->routine->ip = vec_cell(vm, &vm->routine->loops, -1)->inum-1;
-	vm->routine->marks.depth = vec_cell(vm, &vm->routine->loops, -2)->inum;
+	vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2]-1;
+	vm->routine->marks.depth = vm->routine->loops.cells[vm->routine->loops.depth-3];
 	while (depth(vm)) pop(vm);
 }
 
@@ -2431,7 +2442,8 @@ static void op_unpack(rela_vm* vm) {
 }
 
 static void op_pid(rela_vm* vm) {
-	vec_push(vm, &vm->routine->paths, literal(vm));
+	assert(vm->routine->paths.depth < sizeof(vm->routine->paths.cells)/sizeof(int));
+	vm->routine->paths.cells[vm->routine->paths.depth++] = literal(vm).inum;
 }
 
 static void op_type(rela_vm* vm) {
@@ -2440,13 +2452,14 @@ static void op_type(rela_vm* vm) {
 }
 
 // locate a local variable cell in the current frame
-static item_t* local(rela_vm* vm, item_t key) {
+static item_t* local(rela_vm* vm, const char* key) {
 	cor_t* cor = vm->routine;
+
 	if (!cor->frames.depth) return NULL;
 	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
 
 	for (int cell = frame->locals, last = vec_size(vm, &cor->locals); cell < last; cell += 2) {
-		if (equal(vm, vec_get(vm, &cor->locals, cell), key)) {
+		if (vec_cell(vm, &cor->locals, cell)->str == key) {
 			return vec_cell(vm, &cor->locals, cell+1);
 		}
 	}
@@ -2454,30 +2467,30 @@ static item_t* local(rela_vm* vm, item_t key) {
 }
 
 // locate a local variable cell in an outer frame
-static item_t* uplocal(rela_vm* vm, item_t key) {
+static item_t* uplocal(rela_vm* vm, const char* key) {
 	cor_t* cor = vm->routine;
 	if (cor->frames.depth < 2) return NULL;
 
 	int index = cor->frames.depth;
 	frame_t* lframe = &cor->frames.cells[--index];
 
-	item_t* pids = vec_cell(vm, &cor->paths, lframe->paths);
-	int depth = vec_size(vm, &cor->paths) - lframe->paths;
+	int* pids = &cor->paths.cells[lframe->paths];
+	int depth = cor->paths.depth - lframe->paths;
 	assert(depth >= 1);
 
 	while (depth > 1 && index > 0) {
 		frame_t* nframe = &cor->frames.cells[index];
 		frame_t* uframe = &cor->frames.cells[--index];
 
-		int pid = vec_cell(vm, &cor->paths, uframe->paths)->inum;
+		int pid = cor->paths.cells[uframe->paths];
 
 		// i=1 to skip checking outer recursive calls to current function
 		for (int i = 1, l = depth; i < l; i++) {
 			// only check this call stack frame if it belongs to another
 			// function from the current function's compile-time scope chain
-			if (pid == pids[i].inum) {
+			if (pid == pids[i]) {
 				for (int cell = uframe->locals, last = nframe->locals; cell < last; cell += 2) {
-					if (equal(vm, vec_get(vm, &cor->locals, cell), key)) {
+					if (vec_cell(vm, &cor->locals, cell)->str == key) {
 						return vec_cell(vm, &cor->locals, cell+1);
 					}
 				}
@@ -2495,7 +2508,8 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	map_t* map = vec_size(vm, &vm->routine->maps) ? vec_top(vm, &vm->routine->maps).map: NULL;
 
 	if (!map && cor->frames.depth) {
-		item_t* cell = local(vm, key);
+		assert(key.type == STRING);
+		item_t* cell = local(vm, key.str);
 		if (cell) *cell = val;
 		else {
 			vec_push(vm, &cor->locals, key);
@@ -2508,8 +2522,9 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 }
 
 static bool find(rela_vm* vm, item_t key, item_t* val) {
-	item_t* cell = local(vm, key);
-	if (!cell) cell = uplocal(vm, key);
+	assert(key.type == STRING);
+	item_t* cell = local(vm, key.str);
+	if (!cell) cell = uplocal(vm, key.str);
 
 	if (cell) {
 		*val = *cell;
@@ -2547,60 +2562,51 @@ static void op_for(rela_vm* vm) {
 
 	int var = 0;
 	vec_t* vars = literal(vm).vec;
-	assert(vec_size(vm, vars) >= 2);
+	assert(vec_size(vm, vars) >= 1);
 
-	int quit = vec_get(vm, vars, vec_size(vm, vars)-1).inum;
-
-	item_t item = pop(vm);
 	item_t iter = top(vm);
+	int step = vm->routine->loops.cells[vm->routine->loops.depth-1];
 
 	if (iter.type == INTEGER) {
-		int step = item.inum;
-
 		if (step == iter.inum) {
-			vm->routine->ip = quit;
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
 		}
 		else {
-			if (vec_size(vm, vars) > 2)
+			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 
 			assign(vm, vec_get(vm, vars, var++), integer(vm,step));
-			push(vm, integer(vm, ++step));
 		}
 	}
 	else
 	if (iter.type == VECTOR) {
-		int step = item.inum;
-
 		if (step >= vec_size(vm, iter.vec)) {
-			vm->routine->ip = quit;
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
 		}
 		else {
-			if (vec_size(vm, vars) > 2)
+			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 
 			assign(vm, vec_get(vm, vars, var++), vec_get(vm, iter.vec, step));
-			push(vm, integer(vm, ++step));
 		}
 	}
 	else
 	if (iter.type == MAP) {
-		int step = item.inum;
-
 		if (step >= vec_size(vm, &iter.map->keys)) {
-			vm->routine->ip = quit;
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
 		}
 		else {
-			if (vec_size(vm, vars) > 2)
+			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->keys, step));
 
 			assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->vals, step));
-			push(vm, integer(vm, ++step));
 		}
 	}
 	else {
-		vm->routine->ip = quit;
+		vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-1];
 	}
+
+	vm->routine->loops.cells[vm->routine->loops.depth-1] = step+1;
 }
 
 static void set(rela_vm* vm, item_t dst, item_t key, item_t val) {
