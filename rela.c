@@ -51,6 +51,7 @@ enum opcode_t {
 	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
 	OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE, OP_UNPACK,
 	OPP_MARKS, OPP_FNAME, OPP_GNAME, OPP_CFUNC, OPP_A2LIT, OPP_ASSIGNL, OPP_UNMAP, OPP_COPIES,
+	OPP_MUL_LIT, OPP_ADD_LIT,
 	OPERATIONS
 };
 
@@ -1039,6 +1040,18 @@ static int compile(rela_vm* vm, int op, item_t item) {
 			last->item.fnum = -last->item.fnum;
 			return vm->code.depth-1;
 		}
+
+		// lit,add
+		if (op == OP_ADD && last->op == OP_LIT) {
+			last->op = OPP_ADD_LIT;
+			return vm->code.depth-1;
+		}
+
+		// lit,mul
+		if (op == OP_MUL && last->op == OP_LIT) {
+			last->op = OPP_MUL_LIT;
+			return vm->code.depth-1;
+		}
 	}
 
 	vm->code.cells[vm->code.depth++] = (code_t){.op = op, .item = item};
@@ -1070,7 +1083,7 @@ static item_t pop(rela_vm* vm) {
 }
 
 static item_t top(rela_vm* vm) {
-	return *vec_cell(vm, stack(vm), -1);
+	return *stack_cell(vm, -1);
 }
 
 static item_t* item(rela_vm* vm, int i) {
@@ -2193,10 +2206,10 @@ static void op_unmark(rela_vm* vm) {
 static void limit(rela_vm* vm, int count) {
 	assert(vm->routine->marks.depth > 0);
 	int old_depth = vm->routine->marks.cells[--vm->routine->marks.depth];
-	int req_depth = old_depth + count;
 	if (count >= 0) {
-		while (req_depth < vec_size(vm, stack(vm))) pop(vm);
-		while (req_depth > vec_size(vm, stack(vm))) push(vm, nil(vm));
+		int req_depth = old_depth + count;
+		if (req_depth < vec_size(vm, stack(vm))) vec_shrink(vm, stack(vm), req_depth);
+		else while (req_depth > vec_size(vm, stack(vm))) push(vm, nil(vm));
 	}
 }
 
@@ -2675,6 +2688,11 @@ static void op_add(rela_vm* vm) {
 	op_drop(vm);
 }
 
+static void op_add_lit(rela_vm* vm) {
+	item_t* a = stack_cell(vm, -1);
+	*a = add(vm, *a, literal(vm));
+}
+
 static void op_neg(rela_vm* vm) {
 	if (top(vm).type == INTEGER) {
 		vec_cell(vm, stack(vm), -1)->inum *= -1;
@@ -2699,6 +2717,11 @@ static void op_mul(rela_vm* vm) {
 	item_t* a = stack_cell(vm, -2);
 	*a = multiply(vm, *a, *b);
 	op_drop(vm);
+}
+
+static void op_mul_lit(rela_vm* vm) {
+	item_t* a = stack_cell(vm, -1);
+	*a = multiply(vm, *a, literal(vm));
 }
 
 static void op_div(rela_vm* vm) {
@@ -3057,6 +3080,8 @@ func_t funcs[OPERATIONS] = {
 	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl   },
 	[OPP_UNMAP]    = { .name = "unmapl",    .lib = false, .func = op_unmapl    },
 	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies    },
+	[OPP_MUL_LIT]  = { .name = "litmul",    .lib = false, .func = op_mul_lit   },
+	[OPP_ADD_LIT]  = { .name = "litadd",    .lib = false, .func = op_add_lit   },
 };
 
 static void decompile(rela_vm* vm, code_t* c) {
@@ -3212,6 +3237,7 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 		for (;;) {
 			int ip = vm->routine->ip++;
 			assert(ip >= 0 && ip < vm->code.depth);
+
 			int opcode = vm->code.cells[ip].op;
 			if (opcode == OP_STOP) break;
 
@@ -3225,7 +3251,17 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 				fflush(stderr);
 			#endif
 
-			funcs[opcode].func(vm);
+			switch (opcode) {
+				case OP_JMP: op_jmp(vm); break;
+				case OP_FOR: op_for(vm); break;
+				case OP_PID: op_pid(vm); break;
+				case OP_LIT: op_lit(vm); break;
+				case OP_MARK: op_mark(vm); break;
+				case OP_LIMIT: op_limit(vm); break;
+				case OP_CLEAN: op_clean(vm); break;
+				case OP_RETURN: op_return(vm); break;
+				default: funcs[opcode].func(vm); break;
+			}
 
 			#ifdef TRACE
 				fprintf(stderr, "[");
@@ -3243,7 +3279,6 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 			#endif
 		}
 	}
-
 	reset(vm);
 	return 0;
 }
