@@ -50,7 +50,7 @@ enum opcode_t {
 	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_PID, OP_GC,
 	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
 	OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE, OP_UNPACK,
-	OPP_MARKS, OPP_FNAME, OPP_GNAME, OPP_CFUNC, OPP_A2LIT, OPP_ASSIGNL, OPP_UNMAP, OPP_COPIES,
+	OPP_FNAME, OPP_GNAME, OPP_CFUNC, OPP_ASSIGNP, OPP_ASSIGNL, OPP_COPIES,
 	OPP_MUL_LIT, OPP_ADD_LIT,
 	OPERATIONS
 };
@@ -77,7 +77,7 @@ const char* type_names[TYPES] = {
 
 enum {
 	NODE_MULTI=1, NODE_NAME, NODE_LITERAL, NODE_OPCODE, NODE_IF, NODE_WHILE, NODE_FUNCTION, NODE_RETURN,
-	NODE_VEC, NODE_MAP, NODE_FOR, NODE_CALL_CHAIN
+	NODE_VEC, NODE_MAP, NODE_FOR, NODE_CALL_CHAIN, NODE_OPERATOR
 };
 
 #define STRTMP 100
@@ -165,6 +165,8 @@ typedef struct _node_t {
 	struct _node_t *chain;
 	bool index;
 	bool field;
+	bool control;
+	bool single;
 	vec_t* keys;
 	vec_t* vals;
 	int results;
@@ -192,26 +194,27 @@ typedef struct {
 	int precedence;
 	int opcode;
 	int argc;
+	bool single; // single result
 } operator_t;
 
 // order is important; eg longer >= should be matched before >
 operator_t operators[] = {
-	{ .name = "||", .precedence = 0, .opcode = OP_OR,    .argc = 2 },
-	{ .name = "or", .precedence = 0, .opcode = OP_OR,    .argc = 2 },
-	{ .name = "&&", .precedence = 1, .opcode = OP_AND,   .argc = 2 },
-	{ .name = "==", .precedence = 2, .opcode = OP_EQ,    .argc = 2 },
-	{ .name = "!=", .precedence = 2, .opcode = OP_NE,    .argc = 2 },
-	{ .name = ">=", .precedence = 2, .opcode = OP_GTE,   .argc = 2 },
-	{ .name = ">",  .precedence = 2, .opcode = OP_GT,    .argc = 2 },
-	{ .name = "<=", .precedence = 2, .opcode = OP_LTE,   .argc = 2 },
-	{ .name = "<",  .precedence = 2, .opcode = OP_LT,    .argc = 2 },
-	{ .name = "~",  .precedence = 2, .opcode = OP_MATCH, .argc = 2 },
-	{ .name = "+",  .precedence = 3, .opcode = OP_ADD,   .argc = 2 },
-	{ .name = "-",  .precedence = 3, .opcode = OP_SUB,   .argc = 2 },
-	{ .name = "*",  .precedence = 4, .opcode = OP_MUL,   .argc = 2 },
-	{ .name = "/",  .precedence = 4, .opcode = OP_DIV,   .argc = 2 },
-	{ .name = "%",  .precedence = 4, .opcode = OP_MOD,   .argc = 2 },
-	{ .name = "...",.precedence = 4, .opcode = OP_UNPACK,.argc = 1 },
+	{ .name = "||", .precedence = 0, .opcode = OP_OR,    .argc = 2, .single = true },
+	{ .name = "or", .precedence = 0, .opcode = OP_OR,    .argc = 2, .single = true },
+	{ .name = "&&", .precedence = 1, .opcode = OP_AND,   .argc = 2, .single = true },
+	{ .name = "==", .precedence = 2, .opcode = OP_EQ,    .argc = 2, .single = true },
+	{ .name = "!=", .precedence = 2, .opcode = OP_NE,    .argc = 2, .single = true },
+	{ .name = ">=", .precedence = 2, .opcode = OP_GTE,   .argc = 2, .single = true },
+	{ .name = ">",  .precedence = 2, .opcode = OP_GT,    .argc = 2, .single = true },
+	{ .name = "<=", .precedence = 2, .opcode = OP_LTE,   .argc = 2, .single = true },
+	{ .name = "<",  .precedence = 2, .opcode = OP_LT,    .argc = 2, .single = true },
+	{ .name = "~",  .precedence = 2, .opcode = OP_MATCH, .argc = 2, .single = true },
+	{ .name = "+",  .precedence = 3, .opcode = OP_ADD,   .argc = 2, .single = true },
+	{ .name = "-",  .precedence = 3, .opcode = OP_SUB,   .argc = 2, .single = true },
+	{ .name = "*",  .precedence = 4, .opcode = OP_MUL,   .argc = 2, .single = true },
+	{ .name = "/",  .precedence = 4, .opcode = OP_DIV,   .argc = 2, .single = true },
+	{ .name = "%",  .precedence = 4, .opcode = OP_MOD,   .argc = 2, .single = true },
+	{ .name = "...",.precedence = 4, .opcode = OP_UNPACK,.argc = 1, .single = false },
 };
 
 typedef keyword_t modifier_t;
@@ -944,16 +947,14 @@ static int compile(rela_vm* vm, int op, item_t item) {
 	if (vm->code.depth > 0) {
 		code_t* last = compiled(vm, -1);
 
-		// marks,mark -> marks+1
-		if (op == OP_MARK && last->op == OPP_MARKS) {
-			last->item.inum++;
+		// remove implicit return block dead code
+		if (op == OP_CLEAN && last->op == OP_CLEAN) {
 			return vm->code.depth-1;
 		}
-
-		// mark,mark -> marks2
-		if (op == OP_MARK && last->op == OP_MARK) {
-			last->op = OPP_MARKS;
-			last->item = integer(vm, 2);
+		if (op == OP_CLEAN && last->op == OP_RETURN) {
+			return vm->code.depth-1;
+		}
+		if (op == OP_RETURN && last->op == OP_RETURN) {
 			return vm->code.depth-1;
 		}
 
@@ -997,33 +998,21 @@ static int compile(rela_vm* vm, int op, item_t item) {
 			return vm->code.depth-1;
 		}
 
-		// unmap,limit0 -> unmapl
-		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 1 && last->op == OP_UNMAP) {
-			last->op = OPP_UNMAP;
+		// lit,assign0 -> assignl
+		if (op == OP_ASSIGN && item.type == INTEGER && item.inum == 0 && last->op == OP_LIT) {
+			last->op = OPP_ASSIGNL;
 			return vm->code.depth-1;
 		}
 
-		// mark,lit,lit,assign,limit0 -> lit,a2lit (map { litkey = litval })
-		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && vm->code.depth > 4) {
-			bool mark = vm->code.cells[vm->code.depth-4].op == OP_MARK;
-			bool lit1 = vm->code.cells[vm->code.depth-3].op == OP_LIT;
-			bool lit2 = vm->code.cells[vm->code.depth-2].op == OP_LIT;
-			bool assign = last->op == OP_ASSIGN && last->item.inum == 0;
-			if (mark && lit1 && lit2 && assign) {
-				item_t key = vm->code.cells[vm->code.depth-2].item;
-				vm->code.cells[vm->code.depth-4] = vm->code.cells[vm->code.depth-3];
-				vm->code.cells[vm->code.depth-3] = (code_t){.op = OPP_A2LIT, .item = key};
-				vm->code.depth-=2;
-				return vm->code.depth-1;
-			}
-		}
-
-		// lit,assign0,limit0 -> assignl
-		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && vm->code.depth > 2) {
-			bool assign = last->op == OP_ASSIGN && last->item.type == INTEGER && last->item.inum == 0;
-			code_t* prior = compiled(vm, -2);
-			if (assign && prior->op == OP_LIT) {
-				prior->op = OPP_ASSIGNL;
+		// mark,lit,assignl,limit0 -> lit,assignp (map { litkey = litval }, var = lit)
+		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && vm->code.depth > 3) {
+			bool mark = vm->code.cells[vm->code.depth-3].op == OP_MARK;
+			bool lit1 = vm->code.cells[vm->code.depth-2].op == OP_LIT;
+			bool assignl = last->op == OPP_ASSIGNL;
+			if (mark && lit1 && assignl) {
+				item_t key = last->item;
+				vm->code.cells[vm->code.depth-3] = vm->code.cells[vm->code.depth-2];
+				vm->code.cells[vm->code.depth-2] = (code_t){.op = OPP_ASSIGNP, .item = key};
 				vm->code.depth--;
 				return vm->code.depth-1;
 			}
@@ -1222,11 +1211,11 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 
 	ensure(vm, found_else || found_end, "expected keyword 'else' or 'end': %s", &source[offset]);
 
+	// last NODE_MULTI in the block returns its value (ternary operator equiv)
 	if (vec_size(vm, node->vals))
-		vec_cell(vm, node->vals, vec_size(vm, node->vals)-1)->node->results = 1;
-
+		vec_cell(vm, node->vals, vec_size(vm, node->vals)-1)->node->results = RESULTS_FIRST;
 	if (vec_size(vm, node->keys))
-		vec_cell(vm, node->keys, vec_size(vm, node->keys)-1)->node->results = 1;
+		vec_cell(vm, node->keys, vec_size(vm, node->keys)-1)->node->results = RESULTS_FIRST;
 
 	return offset;
 }
@@ -1279,8 +1268,8 @@ static int parse_node(rela_vm* vm, const char *source) {
 		node_t* outer = node_allot(vm);
 		outer->type = NODE_OPCODE;
 		outer->opcode = modifier->opcode;
+		outer->single = true;
 		outer->args = pop(vm).node;
-		outer->results = 1;
 		push(vm, (item_t){.type = NODE, .node = outer});
 		return offset;
 	}
@@ -1308,6 +1297,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			if (peek(&source[offset], "if")) {
 				offset += 2;
 				node->type = NODE_IF;
+//breaks ternary				node->control = true;
 
 				// conditions
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
@@ -1320,6 +1310,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			if (peek(&source[offset], "while")) {
 				offset += 5;
 				node->type = NODE_WHILE;
+				node->control = true;
 
 				// conditions
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
@@ -1332,6 +1323,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			if (peek(&source[offset], "for")) {
 				offset += 3;
 				node->type = NODE_FOR;
+				node->control = true;
 
 				// key[,val] local variable names
 				offset += skip_gap(&source[offset]);
@@ -1363,6 +1355,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			if (peek(&source[offset], "function")) {
 				offset += 8;
 				node->type = NODE_FUNCTION;
+				node->control = true;
 
 				ensure(vm, vm->fpath.depth < sizeof(vm->fpath.ids)/sizeof(vm->fpath.ids[0]), "reached function nest limit(%ld)", sizeof(vm->fpath.ids)/sizeof(vm->fpath.ids[0]));
 
@@ -1424,6 +1417,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			if (peek(&source[offset], "return")) {
 				offset += 6;
 				node->type = NODE_RETURN;
+				node->control = true;
 
 				offset += skip_gap(&source[offset]);
 
@@ -1438,12 +1432,14 @@ static int parse_node(rela_vm* vm, const char *source) {
 				offset += 5;
 				node->type = NODE_OPCODE;
 				node->opcode = OP_BREAK;
+				node->control = true;
 			}
 			else
 			if (peek(&source[offset], "continue")) {
 				offset += 8;
 				node->type = NODE_OPCODE;
 				node->opcode = OP_CONTINUE;
+				node->control = true;
 			}
 			else {
 				node->item = string(vm, substr(vm, &source[offset], 0, length));
@@ -1454,6 +1450,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 	else
 	if (source[offset] == '"') {
 		node->type = NODE_LITERAL;
+		node->single = true;
 		char *end = NULL;
 		node->item = string(vm, strliteral(vm, &source[offset], &end));
 		offset += end - &source[offset];
@@ -1461,6 +1458,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 	else
 	if (isdigit(source[offset])) {
 		node->type = NODE_LITERAL;
+		node->single = true;
 		char *a = NULL, *b = NULL;
 		int64_t i = strtoll(&source[offset], &a, 0);
 		double f = strtod(&source[offset], &b);
@@ -1472,6 +1470,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 	if (source[offset] == '[') {
 		offset++;
 		node->type = NODE_VEC;
+		node->single = true;
 		while (source[offset] && source[offset] != ']') {
 			if ((length = skip_gap(&source[offset])) > 0)
 			{
@@ -1493,6 +1492,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 	if (source[offset] == '{') {
 		offset++;
 		node->type = NODE_MAP;
+		node->single = true;
 
 		while (source[offset] && source[offset] != '}') {
 			if ((length = skip_gap(&source[offset])) > 0)
@@ -1606,7 +1606,7 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 				offset++;
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
 				arguments[argument++] = pop(vm).node;
-				arguments[argument-1]->results = 1;
+				arguments[argument-1]->results = RESULTS_FIRST;
 				offset += skip_gap(&source[offset]);
 				ensure(vm, source[offset] == ')', "expected closing paren: %s", &source[offset]);
 				offset++;
@@ -1636,8 +1636,9 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 			while (operation > 0 && operations[operation-1]->precedence >= compare->precedence) {
 				operator_t *consume = operations[--operation];
 				node_t *result = node_allot(vm);
-				result->type   = NODE_OPCODE;
+				result->type   = NODE_OPERATOR;
 				result->opcode = consume->opcode;
+				result->single = consume->single;
 				ensure(vm, argument >= consume->argc, "operator %s insufficient arguments", consume->name);
 				for (int j = consume->argc; j > 0; --j) {
 					vec_push_allot(vm, &result->vals, (item_t){.type = NODE, .node = arguments[argument-j]});
@@ -1653,8 +1654,9 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 		while (operation && argument) {
 			operator_t *consume = operations[--operation];
 			node_t *result = node_allot(vm);
-			result->type   = NODE_OPCODE;
+			result->type   = NODE_OPERATOR;
 			result->opcode = consume->opcode;
+			result->single = consume->single;
 			ensure(vm, argument >= consume->argc, "operator %s insufficient arguments", consume->name);
 			for (int j = consume->argc; j > 0; --j) {
 				vec_push_allot(vm, &result->vals, (item_t){.type = NODE, .node = arguments[argument-j]});
@@ -1689,11 +1691,25 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 
 	ensure(vm, vec_size(vm, node->vals) > 0, "missing assignment value: %s", &source[offset]);
 
+	bool solo = !node->args && !vec_size(vm, node->keys) && vec_size(vm, node->vals) == 1;
+
+	// node guarantees to handle it's own result limits
+	if (solo && vec_get(vm, node->vals, 0).node->control) {
+		push(vm, (item_t){.type = NODE, .node = vec_get(vm, node->vals, 0).node});
+		return offset;
+	}
+
+	// node guarantees to return a single result
+	if (solo && results != RESULTS_DISCARD && vec_get(vm, node->vals, 0).node->single) {
+		push(vm, (item_t){.type = NODE, .node = vec_get(vm, node->vals, 0).node});
+		return offset;
+	}
+
 	push(vm, (item_t){.type = NODE, .node = node});
 	return offset;
 }
 
-static void process(rela_vm* vm, node_t *node, int flags, int index) {
+static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) {
 	int flag_assign = flags & PROCESS_ASSIGN ? 1:0;
 
 	// if we're assigning with chained expressions, only OP_SET|OP_ASSIGN the last one
@@ -1713,12 +1729,12 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// stream the values onto the substack
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
 
 		// OP_SET|OP_ASSIGN index values from the start of the current substack frame
 		for (int i = 0; i < vec_size(vm, node->keys); i++) {
 			node_t* subnode = vec_get(vm, node->keys, i).node;
-			process(vm, subnode, PROCESS_ASSIGN, i);
+			process(vm, subnode, PROCESS_ASSIGN, i, -1);
 		}
 
 		// end substack frame
@@ -1736,13 +1752,13 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 			// vecmap[fn()]
 			if (node->index) {
 				compile(vm, OP_MARK, nil(vm));
-					compile(vm, OP_MARK, nil(vm));
+//					compile(vm, OP_MARK, nil(vm));
 						if (node->args)
-							process(vm, node->args, 0, 0);
+							process(vm, node->args, 0, 0, -1);
 						compile(vm, OP_LIT, node->item);
 						compile(vm, OP_FIND, nil(vm));
 						compile(vm, OP_CALL, nil(vm));
-					compile(vm, OP_LIMIT, integer(vm, -1));
+//					compile(vm, OP_LIMIT, integer(vm, -1));
 				compile(vm, OP_LIMIT, integer(vm, 1));
 				compile(vm, OP_GET, nil(vm));
 			}
@@ -1754,21 +1770,21 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 				compile(vm, OP_SHUNT, nil(vm));
 				compile(vm, OP_MARK, nil(vm));
 					if (node->args)
-						process(vm, node->args, 0, 0);
+						process(vm, node->args, 0, 0, -1);
 					compile(vm, OP_SHIFT, nil(vm));
 					compile(vm, OP_CALL, nil(vm));
-				compile(vm, OP_LIMIT, integer(vm, -1));
+				compile(vm, OP_LIMIT, integer(vm, limit));
 			}
 
 			// fn()
 			if (!node->index && !node->field) {
 				compile(vm, OP_MARK, nil(vm));
 					if (node->args)
-						process(vm, node->args, 0, 0);
+						process(vm, node->args, 0, 0, -1);
 					compile(vm, OP_LIT, node->item);
 					compile(vm, OP_FIND, nil(vm));
 					compile(vm, OP_CALL, nil(vm));
-				compile(vm, OP_LIMIT, integer(vm, -1));
+				compile(vm, OP_LIMIT, integer(vm, limit));
 			}
 		}
 		// variable reference
@@ -1806,7 +1822,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 	}
 	else
@@ -1831,31 +1847,31 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		}
 
 		for (int i = 0; i < vec_size(vm, node->keys); i++)
-			process(vm, vec_get(vm, node->keys, i).node, PROCESS_ASSIGN, i);
+			process(vm, vec_get(vm, node->keys, i).node, PROCESS_ASSIGN, i, -1);
 
 		compile(vm, OP_CLEAN, nil(vm));
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		// if an explicit return expression is used, these instructions
 		// will be dead code
 		compile(vm, OP_CLEAN, nil(vm));
 		compile(vm, OP_RETURN, nil(vm));
 		compiled(vm, jump)->item = integer(vm, vm->code.depth);
-		// will sub dead code
 
-		compile(vm, OP_LIMIT, integer(vm, 1));
+		// value only returns if not function name() form
+		compile(vm, OP_LIMIT, integer(vm, node->item.type ? 0:1));
 
 		// function() ... end()
 		if (node->call) {
 			compile(vm, OP_SHUNT, nil(vm));
 			compile(vm, OP_MARK, nil(vm));
 				if (node->args)
-					process(vm, node->args, 0, 0);
+					process(vm, node->args, 0, 0, -1);
 				compile(vm, OP_SHIFT, nil(vm));
 				compile(vm, OP_CALL, nil(vm));
-			compile(vm, OP_LIMIT, integer(vm, -1));
+			compile(vm, OP_LIMIT, integer(vm, limit));
 		}
 	}
 	else
@@ -1864,38 +1880,20 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_SHUNT, nil(vm));
 		compile(vm, OP_MARK, nil(vm));
 			if (node->args)
-				process(vm, node->args, 0, 0);
+				process(vm, node->args, 0, 0, -1);
 			compile(vm, OP_SHIFT, nil(vm));
 			for (int i = 0; i < vec_size(vm, node->vals); i++)
-				process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+				process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
 			compile(vm, OP_CALL, nil(vm));
-		compile(vm, OP_LIMIT, integer(vm, -1));
+		compile(vm, OP_LIMIT, integer(vm, limit));
 
 		if (node->index) {
 			compile(vm, assigning ? OP_SET: OP_GET, nil(vm));
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
-	}
-	else
-	if (node->type == NODE_OPCODE && node->opcode == OP_AND) {
-		assert(vec_size(vm, node->vals) == 2);
-		process(vm, vec_get(vm, node->vals, 0).node, 0, 0);
-		int jump = compile(vm, OP_JFALSE, nil(vm));
-		compile(vm, OP_DROP, nil(vm));
-		process(vm, vec_get(vm, node->vals, 1).node, 0, 0);
-		compiled(vm, jump)->item = integer(vm, vm->code.depth);
-	}
-	else
-	if (node->type == NODE_OPCODE && node->opcode == OP_OR) {
-		assert(vec_size(vm, node->vals) == 2);
-		process(vm, vec_get(vm, node->vals, 0).node, 0, 0);
-		int jump = compile(vm, OP_JTRUE, nil(vm));
-		compile(vm, OP_DROP, nil(vm));
-		process(vm, vec_get(vm, node->vals, 1).node, 0, 0);
-		compiled(vm, jump)->item = integer(vm, vm->code.depth);
 	}
 	// inline opcode
 	else
@@ -1903,10 +1901,10 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		assert(node->opcode != OP_CALL);
 
 		if (node->args)
-			process(vm, node->args, 0, 0);
+			process(vm, node->args, 0, 0, -1);
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
 
 		compile(vm, node->opcode, nil(vm));
 
@@ -1915,7 +1913,40 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
+		}
+	}
+	else
+	if (node->type == NODE_OPERATOR && node->opcode == OP_AND) {
+		assert(vec_size(vm, node->vals) == 2);
+		process(vm, vec_get(vm, node->vals, 0).node, 0, 0, 1);
+		int jump = compile(vm, OP_JFALSE, nil(vm));
+		compile(vm, OP_DROP, nil(vm));
+		process(vm, vec_get(vm, node->vals, 1).node, 0, 0, 1);
+		compiled(vm, jump)->item = integer(vm, vm->code.depth);
+	}
+	else
+	if (node->type == NODE_OPERATOR && node->opcode == OP_OR) {
+		assert(vec_size(vm, node->vals) == 2);
+		process(vm, vec_get(vm, node->vals, 0).node, 0, 0, 1);
+		int jump = compile(vm, OP_JTRUE, nil(vm));
+		compile(vm, OP_DROP, nil(vm));
+		process(vm, vec_get(vm, node->vals, 1).node, 0, 0, 1);
+		compiled(vm, jump)->item = integer(vm, vm->code.depth);
+	}
+	else
+	if (node->type == NODE_OPERATOR) {
+		for (int i = 0; i < vec_size(vm, node->vals); i++)
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 1);
+
+		compile(vm, node->opcode, nil(vm));
+
+		if (node->index) {
+			compile(vm, assigning ? OP_SET: OP_GET, nil(vm));
+		}
+
+		if (node->chain) {
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 	}
 	else
@@ -1962,7 +1993,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 				if (length) {
 					const char *sub = substr(vm, start, 0, length);
 					ensure(vm, length == parse(vm, sub, RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR), "string interpolation parsing failed");
-					process(vm, pop(vm).node, 0, 0);
+					process(vm, pop(vm).node, 0, 0, -1);
 					if (started) compile(vm, OP_CONCAT, nil(vm));
 					started = true;
 				}
@@ -1983,7 +2014,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0);
+			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 
 		ensure(vm, !assigning || node->item.type == STRING, "cannot assign %s",
@@ -2001,7 +2032,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// conditions
 		if (node->args)
-			process(vm, node->args, 0, 0);
+			process(vm, node->args, 0, 0, -1);
 
 		// if false, jump to else/end
 		int jump = compile(vm, OP_JFALSE, nil(vm));
@@ -2009,7 +2040,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// success block
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		// optional failure block
 		if (vec_size(vm, node->keys)) {
@@ -2020,7 +2051,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 			// failure block
 			for (int i = 0; i < vec_size(vm, node->keys); i++)
-				process(vm, vec_get(vm, node->keys, i).node, 0, 0);
+				process(vm, vec_get(vm, node->keys, i).node, 0, 0, 0);
 
 			compiled(vm, jump2)->item = integer(vm, vm->code.depth);
 		}
@@ -2041,7 +2072,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// condition(s)
 		if (node->args)
-			process(vm, node->args, 0, 0);
+			process(vm, node->args, 0, 0, -1);
 
 		// if false, jump to end
 		int iter = compile(vm, OP_JFALSE, nil(vm));
@@ -2049,7 +2080,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// do ... end
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
@@ -2067,12 +2098,9 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// the iterable
 		if (node->args)
-			process(vm, node->args, 0, 0);
+			process(vm, node->args, 0, 0, -1);
 
-//		// loop counter
-//		compile(vm, OP_LIT, integer(vm, 0));
-
-		compile(vm, OP_MARK, nil(vm));
+//		compile(vm, OP_MARK, nil(vm));
 		int loop = compile(vm, OP_LOOP, nil(vm));
 
 		int begin = vm->code.depth;
@@ -2083,15 +2111,14 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 
 		// block
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
-//		vec_push_allot(vm, &node->keys, integer(vm, vm->code.depth));
 		compiled(vm, loop)->item = integer(vm, vm->code.depth);
 		compile(vm, OP_UNLOOP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 0));
-		compile(vm, OP_LIMIT, integer(vm, 0));
+//		compile(vm, OP_LIMIT, integer(vm, 0));
 
 		ensure(vm, !assigning, "cannot assign to for block");
 	}
@@ -2101,7 +2128,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		compile(vm, OP_CLEAN, nil(vm));
 
 		if (node->args)
-			process(vm, node->args, 0, 0);
+			process(vm, node->args, 0, 0, -1);
 
 		compile(vm, OP_RETURN, nil(vm));
 
@@ -2114,7 +2141,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		assert(!node->args);
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++) {
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
 		}
 
 		compile(vm, OP_VECTOR, nil(vm));
@@ -2128,7 +2155,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index) {
 		assert(!node->args);
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0);
+			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		compile(vm, OP_UNMAP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 1));
@@ -2145,7 +2172,7 @@ static void source(rela_vm* vm, const char *source) {
 		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_COMMA|PARSE_ANDOR);
 
 	for (int i = 0, l = depth(vm); i < l; i++)
-		process(vm, item(vm, i)->node, 0, 0);
+		process(vm, item(vm, i)->node, 0, 0, -1);
 
 	while (depth(vm)) pop(vm);
 }
@@ -2182,7 +2209,7 @@ static void op_print(rela_vm* vm) {
 }
 
 static void op_clean(rela_vm* vm) {
-	while (depth(vm)) pop(vm);
+	stack(vm)->count -= depth(vm);
 }
 
 static void op_map(rela_vm* vm) {
@@ -2925,10 +2952,6 @@ static void op_assert(rela_vm* vm) {
 	ensure(vm, depth(vm) && truth(vm, top(vm)), "assert");
 }
 
-static void op_marks(rela_vm* vm) {
-	for (int i = 0, l = literal_int(vm); i < l; i++) op_mark(vm);
-}
-
 static void op_fname(rela_vm* vm) {
 	item_t key = literal(vm);
 	item_t val = nil(vm);
@@ -2958,25 +2981,18 @@ static void op_cfunc(rela_vm* vm) {
 }
 
 // compression of mark,lit,lit,assign,limit0
-static void op_a2lit(rela_vm* vm) {
+static void op_assignp(rela_vm* vm) {
 	item_t key = literal(vm);
 	item_t val = pop(vm);
 	assign(vm, key, val);
 }
 
-// lit,assign0,limit0
+// lit,assign0
 static void op_assignl(rela_vm* vm) {
 	item_t key = literal(vm);
 	// indexed from the base of the current subframe
 	item_t val = depth(vm) ? *item(vm, 0): nil(vm);
 	assign(vm, key, val);
-	limit(vm, 0);
-}
-
-// unmap,limit1
-static void op_unmapl(rela_vm* vm) {
-	op_unmap(vm);
-	limit(vm, 1);
 }
 
 // dups
@@ -3072,13 +3088,11 @@ func_t funcs[OPERATIONS] = {
 	[OP_MIN]       = { .name = "min",       .lib = true, .func = op_min       },
 	[OP_MAX]       = { .name = "max",       .lib = true, .func = op_max       },
 	// peephole
-	[OPP_MARKS]    = { .name = "marks",     .lib = false, .func = op_marks     },
 	[OPP_FNAME]    = { .name = "fname",     .lib = false, .func = op_fname     },
 	[OPP_GNAME]    = { .name = "gname",     .lib = false, .func = op_gname     },
 	[OPP_CFUNC]    = { .name = "cfunc",     .lib = false, .func = op_cfunc     },
-	[OPP_A2LIT]    = { .name = "a2lit",     .lib = false, .func = op_a2lit     },
+	[OPP_ASSIGNP]  = { .name = "assignp",   .lib = false, .func = op_assignp   },
 	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl   },
-	[OPP_UNMAP]    = { .name = "unmapl",    .lib = false, .func = op_unmapl    },
 	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies    },
 	[OPP_MUL_LIT]  = { .name = "litmul",    .lib = false, .func = op_mul_lit   },
 	[OPP_ADD_LIT]  = { .name = "litadd",    .lib = false, .func = op_add_lit   },
@@ -3251,16 +3265,16 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 				fflush(stderr);
 			#endif
 
-			switch (opcode) {
-				case OP_JMP: op_jmp(vm); break;
-				case OP_FOR: op_for(vm); break;
-				case OP_PID: op_pid(vm); break;
-				case OP_LIT: op_lit(vm); break;
-				case OP_MARK: op_mark(vm); break;
-				case OP_LIMIT: op_limit(vm); break;
-				case OP_CLEAN: op_clean(vm); break;
-				case OP_RETURN: op_return(vm); break;
-				default: funcs[opcode].func(vm); break;
+			for (;;) {
+				if (opcode == OP_JMP) { op_jmp(vm); break; }
+				if (opcode == OP_FOR) { op_for(vm); break; }
+				if (opcode == OP_PID) { op_pid(vm); break; }
+				if (opcode == OP_LIT) { op_lit(vm); break; }
+				if (opcode == OP_MARK) { op_mark(vm); break; }
+				if (opcode == OP_LIMIT) { op_limit(vm); break; }
+				if (opcode == OP_CLEAN) { op_clean(vm); break; }
+				if (opcode == OP_RETURN) { op_return(vm); break; }
+				funcs[opcode].func(vm); break;
 			}
 
 			#ifdef TRACE
