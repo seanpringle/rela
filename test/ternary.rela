@@ -1,3 +1,7 @@
 
-lib.assert(if true "yes" else "no" end == "yes")
+function a()
+	return "yes"
+end
+
+lib.assert(if true a() else "no" end == "yes")
 lib.assert(if false "yes" else "no" end == "no")

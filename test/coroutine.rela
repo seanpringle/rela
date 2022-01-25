@@ -19,7 +19,7 @@ function gamma(n)
 	end
 end
 
-delta = lib.coroutine(gamma, 1)
+delta = lib.coroutine(gamma)
 
 lib.assert(lib.resume(delta,2) == 2)
 

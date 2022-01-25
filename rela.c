@@ -118,9 +118,9 @@ typedef struct _map_t {
 	vec_t vals;
 } map_t;
 
-#define STACK 64
-#define LOCALS 32
-#define PATH 8
+#define STACK 32u
+#define LOCALS 32u
+#define PATH 8u
 
 typedef struct {
 	int loops;
@@ -142,7 +142,8 @@ typedef struct _cor_t {
 	int ip;
 	int state;
 	struct {
-		item_t cells[STACK];
+		item_t** pages;
+		int width;
 		int depth;
 		int limit;
 	} stack;
@@ -464,14 +465,21 @@ static void gc_mark_map(rela_vm* vm, map_t* map) {
 
 static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	if (!cor) return;
+
 	int index = pool_index(&vm->cors, cor);
 	if (index >= 0) {
 		if (vm->cors.mark[index]) return;
 		vm->cors.mark[index] = true;
 	}
-	for (int i = 0, l = cor->stack.depth; i < l; i++) gc_mark_item(vm, cor->stack.cells[i]);
-	for (int i = 0, l = cor->other.depth; i < l; i++) gc_mark_item(vm, cor->other.cells[i]);
+
+	for (uint32_t i = 0, l = cor->stack.depth; i < l; i++)
+		gc_mark_item(vm, cor->stack.pages[i/STACK][i%STACK]);
+
+	for (int i = 0, l = cor->other.depth; i < l; i++)
+		gc_mark_item(vm, cor->other.cells[i]);
+
 	gc_mark_item(vm, cor->map);
+
 	for (int i = 0, l = cor->frames.depth; i < l; i++) {
 		frame_t* frame = &cor->frames.cells[i];
 		for (int j = 0; j < frame->locals.depth; j++) {
@@ -522,6 +530,8 @@ static void gc(rela_vm* vm) {
 	for (int i = 0, l = vm->cors.depth; i < l; i++) {
 		if (vm->cors.used[i] && !vm->cors.mark[i]) {
 			cor_t* cor = pool_ptr(&vm->cors, i);
+			for (int i = 0; i < cor->stack.width; i++) free(cor->stack.pages[i]);
+			free(cor->stack.pages);
 			pool_free(&vm->cors, cor);
 		}
 	}
@@ -1060,30 +1070,44 @@ static int compile(rela_vm* vm, int op, item_t item) {
 	return vm->code.depth-1;
 }
 
-static item_t* stack_cell(rela_vm* vm, int index) {
-	if (index < 0) index = vm->routine->stack.depth + index;
-	assert(index >= 0 && index < vm->routine->stack.depth);
-	return &vm->routine->stack.cells[index];
-}
-
 static int depth(rela_vm* vm) {
 	int base = vm->routine->marks.depth ? vm->routine->marks.cells[vm->routine->marks.depth-1]: 0;
 	return vm->routine->stack.depth - base;
 }
 
+static item_t* stack_ref(rela_vm* vm, cor_t* routine, int index) {
+	uint32_t page = ((uint32_t)index)/STACK;
+	uint32_t cell = ((uint32_t)index)-(page*STACK);
+	return &routine->stack.pages[page][cell];
+}
+
+static item_t* stack_cell(rela_vm* vm, int index) {
+	if (index < 0) index = vm->routine->stack.depth + index;
+	assert(index >= 0 && index < vm->routine->stack.depth);
+	return stack_ref(vm, vm->routine, index);
+}
+
 static void push(rela_vm* vm, item_t item) {
-	ensure(vm, vm->routine->stack.depth < STACK, "stack overflow");
-	vm->routine->stack.cells[vm->routine->stack.depth++] = item;
+	if (vm->routine->stack.depth == vm->routine->stack.limit) {
+		vm->routine->stack.width++;
+		vm->routine->stack.limit += STACK;
+		vm->routine->stack.pages = realloc(vm->routine->stack.pages, vm->routine->stack.width*sizeof(item_t*));
+		vm->routine->stack.pages[vm->routine->stack.width-1] = malloc(sizeof(item_t)*STACK);
+	}
+	int index = vm->routine->stack.depth++;
+	*stack_ref(vm, vm->routine, index) = item;
 }
 
 static item_t pop(rela_vm* vm) {
 	ensure(vm, vm->routine->stack.depth > 0, "stack underflow");
-	return vm->routine->stack.cells[--vm->routine->stack.depth];
+	int index = --vm->routine->stack.depth;
+	return *stack_ref(vm, vm->routine, index);
 }
 
 static item_t top(rela_vm* vm) {
 	ensure(vm, vm->routine->stack.depth > 0, "stack underflow");
-	return vm->routine->stack.cells[vm->routine->stack.depth-1];
+	int index = vm->routine->stack.depth-1;
+	return *stack_ref(vm, vm->routine, index);
 }
 
 static void opush(rela_vm* vm, item_t item) {
@@ -1096,14 +1120,10 @@ static item_t opop(rela_vm* vm) {
 	return vm->routine->other.cells[--vm->routine->other.depth];
 }
 
-//static item_t otop(rela_vm* vm) {
-//	ensure(vm, vm->routine->other.depth > 0, "other underflow");
-//	return vm->routine->other.cells[vm->routine->other.depth-1];
-//}
-
 static item_t* item(rela_vm* vm, int i) {
 	int base = vm->routine->marks.cells[vm->routine->marks.depth-1];
-	return &vm->routine->stack.cells[i >= 0 ? base+i: i];
+	int index = i >= 0 ? base+i: i;
+	return stack_ref(vm, vm->routine, index);
 }
 
 static item_t pop_type(rela_vm* vm, int type) {
@@ -2305,9 +2325,6 @@ static void op_coroutine(rela_vm* vm) {
 
 	int ip = item(vm, 0)->sub;
 
-	int items = depth(vm);
-	item_t* cell = stack_cell(vm, -items);
-
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 	vm->routine = cor;
 
@@ -2315,10 +2332,6 @@ static void op_coroutine(rela_vm* vm) {
 	arrive(vm, ip);
 	op_mark(vm);
 
-	for (int i = 1; i < items; i++)
-		cor->stack.cells[cor->stack.depth++] = cell[i];
-
-	op_clean(vm);
 	cor->state = COR_SUSPENDED;
 
 	vec_pop(vm, &vm->routines);
@@ -2342,32 +2355,35 @@ static void op_resume(rela_vm* vm) {
 	cor->state = COR_RUNNING;
 
 	int items = depth(vm);
-	item_t* cell = stack_cell(vm, -items);
-
-	for (int i = 1; i < items; i++)
-		cor->stack.cells[cor->stack.depth++] = cell[i];
-
-	vm->routine->stack.depth -= items;
+	cor_t* caller = vm->routine;
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 	vm->routine = cor;
+
+	for (int i = 1; i < items; i++) {
+		int index = caller->stack.depth-items+i;
+		push(vm, *stack_ref(vm, caller, index));
+	}
+
+	caller->stack.depth -= items;
 }
 
 static void op_yield(rela_vm* vm) {
 	int items = depth(vm);
 
-	cor_t *src = vm->routine;
+	cor_t* caller = vm->routine;
+	caller->state = COR_SUSPENDED;
+
 	vec_pop(vm, &vm->routines);
 	vm->routine = vec_top(vm, &vm->routines).cor;
-	cor_t *dst = vm->routine;
 
-	for (int i = 0; i < items; i++)
-		push(vm, src->stack.cells[src->stack.depth - items + i]);
+	for (int i = 0; i < items; i++) {
+		int index = caller->stack.depth-items+i;
+		push(vm, *stack_ref(vm, caller, index));
+	}
 
-	src->stack.depth -= items;
-
-	src->state = COR_SUSPENDED;
-	dst->marks.depth += items;
+	caller->stack.depth -= items;
+	vm->routine->marks.depth += items;
 }
 
 static void op_global(rela_vm* vm) {
@@ -2429,7 +2445,7 @@ static void op_loop(rela_vm* vm) {
 }
 
 static void op_unloop(rela_vm* vm) {
-	assert(vm->routine->loops.depth > 1);
+	assert(vm->routine->loops.depth > 2);
 	--vm->routine->loops.depth;
 	--vm->routine->loops.depth;
 	ensure(vm, vm->routine->loops.cells[--vm->routine->loops.depth] == vm->routine->marks.depth, "mark stack mismatch (unloop)");
@@ -2484,8 +2500,10 @@ static void op_vector(rela_vm* vm) {
 
 	vec_t* vec = vec_allot(vm);
 
-	for (int i = 0; i < items; i++)
-		vec_push(vm, vec, vm->routine->stack.cells[vm->routine->stack.depth - items + i]);
+	for (int i = 0; i < items; i++) {
+		int index = vm->routine->stack.depth - items + i;
+		vec_push(vm, vec, *stack_ref(vm, vm->routine, index));
+	}
 
 	vm->routine->stack.depth -= items;
 
