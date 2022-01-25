@@ -118,6 +118,7 @@ typedef struct _map_t {
 	vec_t vals;
 } map_t;
 
+#define STACK 64
 #define LOCALS 32
 #define PATH 8
 
@@ -138,10 +139,17 @@ typedef struct {
 } frame_t;
 
 typedef struct _cor_t {
-	vec_t stack;  // arguments, results, opcode working
-	vec_t other;  // temporary data moved off stack
 	int ip;
 	int state;
+	struct {
+		item_t cells[STACK];
+		int depth;
+		int limit;
+	} stack;
+	struct {
+		item_t cells[STACK];
+		int depth;
+	} other;
 	struct {
 		frame_t cells[32];
 		int depth;
@@ -461,8 +469,8 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 		if (vm->cors.mark[index]) return;
 		vm->cors.mark[index] = true;
 	}
-	gc_mark_vec(vm, &cor->stack);
-	gc_mark_vec(vm, &cor->other);
+	for (int i = 0, l = cor->stack.depth; i < l; i++) gc_mark_item(vm, cor->stack.cells[i]);
+	for (int i = 0, l = cor->other.depth; i < l; i++) gc_mark_item(vm, cor->other.cells[i]);
 	gc_mark_item(vm, cor->map);
 	for (int i = 0, l = cor->frames.depth; i < l; i++) {
 		frame_t* frame = &cor->frames.cells[i];
@@ -514,8 +522,6 @@ static void gc(rela_vm* vm) {
 	for (int i = 0, l = vm->cors.depth; i < l; i++) {
 		if (vm->cors.used[i] && !vm->cors.mark[i]) {
 			cor_t* cor = pool_ptr(&vm->cors, i);
-			free(cor->stack.items);
-			free(cor->other.items);
 			pool_free(&vm->cors, cor);
 		}
 	}
@@ -585,11 +591,6 @@ static void vec_push_allot(rela_vm* vm, vec_t** vec, item_t item) {
 static item_t vec_pop(rela_vm* vm, vec_t* vec) {
 	ensure(vm, vec->count > 0, "vec_pop underflow");
 	return vec->items[--vec->count];
-}
-
-static void vec_shrink(rela_vm* vm, vec_t* vec, int size) {
-	ensure(vm, vec->count >= size, "vec_pop underflow");
-	vec->count = size;
 }
 
 static item_t vec_top(rela_vm* vm, vec_t* vec) {
@@ -1059,37 +1060,50 @@ static int compile(rela_vm* vm, int op, item_t item) {
 	return vm->code.depth-1;
 }
 
-static vec_t* stack(rela_vm* vm) {
-	return &vm->routine->stack;
-}
-
 static item_t* stack_cell(rela_vm* vm, int index) {
-	vec_t* stk = stack(vm);
-	if (index < 0) index = stk->count + index;
-	assert(index >= 0 && index < stk->count);
-	return &stk->items[index];
+	if (index < 0) index = vm->routine->stack.depth + index;
+	assert(index >= 0 && index < vm->routine->stack.depth);
+	return &vm->routine->stack.cells[index];
 }
 
 static int depth(rela_vm* vm) {
 	int base = vm->routine->marks.depth ? vm->routine->marks.cells[vm->routine->marks.depth-1]: 0;
-	return vec_size(vm, stack(vm)) - base;
+	return vm->routine->stack.depth - base;
 }
 
 static void push(rela_vm* vm, item_t item) {
-	vec_push(vm, stack(vm), item);
+	ensure(vm, vm->routine->stack.depth < STACK, "stack overflow");
+	vm->routine->stack.cells[vm->routine->stack.depth++] = item;
 }
 
 static item_t pop(rela_vm* vm) {
-	return vec_pop(vm, stack(vm));
+	ensure(vm, vm->routine->stack.depth > 0, "stack underflow");
+	return vm->routine->stack.cells[--vm->routine->stack.depth];
 }
 
 static item_t top(rela_vm* vm) {
-	return *stack_cell(vm, -1);
+	ensure(vm, vm->routine->stack.depth > 0, "stack underflow");
+	return vm->routine->stack.cells[vm->routine->stack.depth-1];
 }
+
+static void opush(rela_vm* vm, item_t item) {
+	ensure(vm, vm->routine->other.depth < STACK, "other overflow");
+	vm->routine->other.cells[vm->routine->other.depth++] = item;
+}
+
+static item_t opop(rela_vm* vm) {
+	ensure(vm, vm->routine->other.depth > 0, "other underflow");
+	return vm->routine->other.cells[--vm->routine->other.depth];
+}
+
+//static item_t otop(rela_vm* vm) {
+//	ensure(vm, vm->routine->other.depth > 0, "other underflow");
+//	return vm->routine->other.cells[vm->routine->other.depth-1];
+//}
 
 static item_t* item(rela_vm* vm, int i) {
 	int base = vm->routine->marks.cells[vm->routine->marks.depth-1];
-	return vec_cell(vm, stack(vm), i >= 0 ? base+i: i);
+	return &vm->routine->stack.cells[i >= 0 ? base+i: i];
 }
 
 static item_t pop_type(rela_vm* vm, int type) {
@@ -2180,13 +2194,12 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 static void source(rela_vm* vm, const char *source) {
 	int offset = skip_gap(source);
 
-	while (source[offset])
+	while (source[offset]) {
 		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_COMMA|PARSE_ANDOR);
+		process(vm, pop(vm).node, 0, 0, -1);
+	}
 
-	for (int i = 0, l = depth(vm); i < l; i++)
-		process(vm, item(vm, i)->node, 0, 0, -1);
-
-	while (depth(vm)) pop(vm);
+	ensure(vm, !depth(vm), "parse unbalanced");
 }
 
 static item_t literal(rela_vm* vm) {
@@ -2209,7 +2222,7 @@ static void op_print(rela_vm* vm) {
 	int items = depth(vm);
 	if (!items) return;
 
-	item_t* item = vec_cell(vm, stack(vm), -items);
+	item_t* item = stack_cell(vm, -items);
 
 	char tmp[STRBUF];
 	for (int i = 0; i < items; i++) {
@@ -2221,27 +2234,22 @@ static void op_print(rela_vm* vm) {
 }
 
 static void op_clean(rela_vm* vm) {
-	stack(vm)->count -= depth(vm);
+	vm->routine->stack.depth -= depth(vm);
 }
 
 static void op_map(rela_vm* vm) {
-	vec_push(vm, &vm->routine->other, vm->routine->map);
+	opush(vm, vm->routine->map);
 	vm->routine->map = (item_t){.type = MAP, .map = map_allot(vm)};
 }
 
 static void op_unmap(rela_vm* vm) {
 	push(vm, vm->routine->map);
-	vm->routine->map = vec_pop(vm, &vm->routine->other);
+	vm->routine->map = opop(vm);
 }
 
 static void op_mark(rela_vm* vm) {
 	assert(vm->routine->marks.depth < sizeof(vm->routine->marks.cells)/sizeof(int));
-	vm->routine->marks.cells[vm->routine->marks.depth++] = vec_size(vm, stack(vm));
-}
-
-static void op_unmark(rela_vm* vm) {
-	assert(vm->routine->marks.depth > 0);
-	vm->routine->marks.depth--;
+	vm->routine->marks.cells[vm->routine->marks.depth++] = vm->routine->stack.depth;
 }
 
 static void limit(rela_vm* vm, int count) {
@@ -2249,8 +2257,8 @@ static void limit(rela_vm* vm, int count) {
 	int old_depth = vm->routine->marks.cells[--vm->routine->marks.depth];
 	if (count >= 0) {
 		int req_depth = old_depth + count;
-		if (req_depth < vec_size(vm, stack(vm))) vec_shrink(vm, stack(vm), req_depth);
-		else while (req_depth > vec_size(vm, stack(vm))) push(vm, nil(vm));
+		if (req_depth < vm->routine->stack.depth) vm->routine->stack.depth = req_depth;
+		else while (req_depth > vm->routine->stack.depth) push(vm, nil(vm));
 	}
 }
 
@@ -2297,6 +2305,9 @@ static void op_coroutine(rela_vm* vm) {
 
 	int ip = item(vm, 0)->sub;
 
+	int items = depth(vm);
+	item_t* cell = stack_cell(vm, -items);
+
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 	vm->routine = cor;
 
@@ -2304,10 +2315,8 @@ static void op_coroutine(rela_vm* vm) {
 	arrive(vm, ip);
 	op_mark(vm);
 
-	int items = depth(vm);
-
 	for (int i = 1; i < items; i++)
-		vec_push(vm, &cor->stack, *item(vm, i));
+		cor->stack.cells[cor->stack.depth++] = cell[i];
 
 	op_clean(vm);
 	cor->state = COR_SUSPENDED;
@@ -2333,12 +2342,12 @@ static void op_resume(rela_vm* vm) {
 	cor->state = COR_RUNNING;
 
 	int items = depth(vm);
+	item_t* cell = stack_cell(vm, -items);
 
 	for (int i = 1; i < items; i++)
-		vec_push(vm, &cor->stack, *item(vm, i));
+		cor->stack.cells[cor->stack.depth++] = cell[i];
 
-	for (int i = 0; i < items; i++)
-		pop(vm);
+	vm->routine->stack.depth -= items;
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 	vm->routine = cor;
@@ -2353,10 +2362,9 @@ static void op_yield(rela_vm* vm) {
 	cor_t *dst = vm->routine;
 
 	for (int i = 0; i < items; i++)
-		push(vm, vec_get(vm, &src->stack, vec_size(vm, &src->stack) - items + i));
+		push(vm, src->stack.cells[src->stack.depth - items + i]);
 
-	for (int i = 0; i < items; i++)
-		vec_pop(vm, &src->stack);
+	src->stack.depth -= items;
 
 	src->state = COR_SUSPENDED;
 	dst->marks.depth += items;
@@ -2440,11 +2448,11 @@ static void op_continue(rela_vm* vm) {
 }
 
 static void op_shunt(rela_vm* vm) {
-	vec_push(vm, &vm->routine->other, pop(vm));
+	opush(vm, pop(vm));
 }
 
 static void op_shift(rela_vm* vm) {
-	push(vm, vec_pop(vm, &vm->routine->other));
+	push(vm, opop(vm));
 }
 
 static void op_nil(rela_vm* vm) {
@@ -2477,10 +2485,9 @@ static void op_vector(rela_vm* vm) {
 	vec_t* vec = vec_allot(vm);
 
 	for (int i = 0; i < items; i++)
-		vec_push(vm, vec, vec_get(vm, stack(vm), vec_size(vm, stack(vm)) - items + i));
+		vec_push(vm, vec, vm->routine->stack.cells[vm->routine->stack.depth - items + i]);
 
-	for (int i = 0; i < items; i++)
-		vec_pop(vm, stack(vm));
+	vm->routine->stack.depth -= items;
 
 	push(vm, (item_t){.type = VECTOR, .vec = vec});
 }
@@ -2731,11 +2738,11 @@ static void op_add_lit(rela_vm* vm) {
 
 static void op_neg(rela_vm* vm) {
 	if (top(vm).type == INTEGER) {
-		vec_cell(vm, stack(vm), -1)->inum *= -1;
+		stack_cell(vm, -1)->inum *= -1;
 	}
 	else
 	if (top(vm).type == FLOAT) {
-		vec_cell(vm, stack(vm), -1)->fnum *= -1;
+		stack_cell(vm, -1)->fnum *= -1;
 	}
 	else {
 		char tmp[STRTMP];
@@ -3209,11 +3216,11 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 		vec_push(vm, &vm->modules.names, string(vm, modistry[i].name));
 		vec_push(vm, &vm->modules.entries, integer(vm, vm->code.depth));
 		source(vm, modistry[i].source);
-		assert(!vec_size(vm, stack(vm)));
+		assert(!vm->routine->stack.depth);
 		compile(vm, OP_STOP, nil(0));
 	}
 
-	op_unmark(vm);
+	limit(vm, 0);
 	vec_pop(vm, &vm->routines);
 	vm->routine = NULL;
 
@@ -3248,10 +3255,10 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 
 	int wtf = setjmp(vm->jmp);
 	if (wtf) {
-		char tmp[STRTMP];
+		//char tmp[STRTMP];
 		fprintf(stderr, "%s (", vm->err);
 		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? vm->routine->ip: -1);
-		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
+//		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
 		fprintf(stderr, ")\n");
 		reset(vm);
 		return wtf;
@@ -3303,12 +3310,12 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 
 			#ifdef TRACE
 				fprintf(stderr, "[");
-				for (int i = 0, l = vec_size(vm, stack(vm)); i < l; i++) {
+				for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
 					if (i == l-depth(vm))
 						fprintf(stderr, "|");
 					char tmpB[STRTMP];
 					fprintf(stderr, "%s%s",
-						tmptext(vm, vec_get(vm, stack(vm), i), tmpB, sizeof(tmpB)),
+						tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
 						(i < l-1 ? ", ":"")
 					);
 				}
