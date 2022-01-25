@@ -43,15 +43,17 @@
 #endif
 
 enum opcode_t {
-	OP_STOP=0, OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_RETURN, OP_GLOBAL, OP_MAP, OP_VECTOR,
-	OP_UNMAP, OP_MARK, OP_LIMIT, OP_LOOP, OP_UNLOOP, OP_CLEAN, OP_BREAK, OP_CONTINUE, OP_JMP, OP_JFALSE,
-	OP_JTRUE, OP_FOR, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_LIT, OP_ASSIGN, OP_AND, OP_OR,
+	// <order important>
+	OP_STOP=0, OP_JMP, OP_FOR, OP_PID, OP_LIT, OP_MARK, OP_LIMIT, OP_CLEAN, OP_RETURN,
+	OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT, OPP_GNAME, OPP_COPIES,
+	// </order important>
+	OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_GLOBAL, OP_MAP, OP_VECTOR,
+	OP_UNMAP, OP_LOOP, OP_UNLOOP, OP_BREAK, OP_CONTINUE, OP_JFALSE,
+	OP_JTRUE, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_ASSIGN, OP_AND, OP_OR,
 	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
-	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_PID, OP_GC,
+	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_GC,
 	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
 	OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE, OP_UNPACK,
-	OPP_FNAME, OPP_GNAME, OPP_CFUNC, OPP_ASSIGNP, OPP_ASSIGNL, OPP_COPIES,
-	OPP_MUL_LIT, OPP_ADD_LIT,
 	OPERATIONS
 };
 
@@ -123,7 +125,7 @@ typedef struct {
 	int loops;
 	int marks;
 	int ip;
-	int maps;
+	item_t map;
 	struct {
 		const char* keys[LOCALS];
 		item_t vals[LOCALS];
@@ -134,7 +136,6 @@ typedef struct {
 typedef struct _cor_t {
 	vec_t stack;  // arguments, results, opcode working
 	vec_t other;  // temporary data moved off stack
-	vec_t maps;   // map literals during construction
 	int ip;
 	int state;
 	struct {
@@ -146,13 +147,14 @@ typedef struct _cor_t {
 		int depth;
 	} marks;
 	struct {
-		int cells[32];
+		int cells[8];
 		int depth;
 	} paths;
 	struct {
 		int cells[32];
 		int depth;
 	} loops;
+	item_t map;
 } cor_t; // coroutine
 
 typedef struct{
@@ -461,7 +463,7 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	}
 	gc_mark_vec(vm, &cor->stack);
 	gc_mark_vec(vm, &cor->other);
-	gc_mark_vec(vm, &cor->maps);
+	gc_mark_item(vm, cor->map);
 	for (int i = 0, l = cor->frames.depth; i < l; i++) {
 		frame_t* frame = &cor->frames.cells[i];
 		for (int j = 0; j < frame->locals.depth; j++) {
@@ -514,7 +516,6 @@ static void gc(rela_vm* vm) {
 			cor_t* cor = pool_ptr(&vm->cors, i);
 			free(cor->stack.items);
 			free(cor->other.items);
-			free(cor->maps.items);
 			pool_free(&vm->cors, cor);
 		}
 	}
@@ -2224,11 +2225,13 @@ static void op_clean(rela_vm* vm) {
 }
 
 static void op_map(rela_vm* vm) {
-	vec_push(vm, &vm->routine->maps, (item_t){.type = MAP, .map = map_allot(vm)});
+	vec_push(vm, &vm->routine->other, vm->routine->map);
+	vm->routine->map = (item_t){.type = MAP, .map = map_allot(vm)};
 }
 
 static void op_unmap(rela_vm* vm) {
-	push(vm, (item_t){.type = MAP, .map = vec_pop(vm, &vm->routine->maps).map});
+	push(vm, vm->routine->map);
+	vm->routine->map = vec_pop(vm, &vm->routine->other);
 }
 
 static void op_mark(rela_vm* vm) {
@@ -2268,9 +2271,8 @@ static void arrive(rela_vm* vm, int ip) {
 
 	frame->locals.depth = 0;
 
-	frame->maps = vec_size(vm, &cor->maps);
-	for (int i = 0, l = frame->maps; i < l; i++)
-		vec_push(vm, &cor->other, vec_pop(vm, &cor->maps));
+	frame->map = cor->map;
+	cor->map = nil(vm);
 
 	cor->ip = ip;
 }
@@ -2286,8 +2288,7 @@ static void depart(rela_vm* vm) {
 	cor->loops.depth = frame->loops;
 	cor->paths.depth = frame->paths;
 
-	for (int i = 0, l = frame->maps; i < l; i++)
-		vec_push(vm, &cor->maps, vec_pop(vm, &cor->other));
+	cor->map = frame->map;
 }
 
 static void op_coroutine(rela_vm* vm) {
@@ -2509,7 +2510,7 @@ static item_t* local(rela_vm* vm, const char* key) {
 	if (!cor->frames.depth) return NULL;
 	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
 
-	for (int i = 0; i < frame->locals.depth; i++) {
+	for (int i = 0, l = frame->locals.depth; i < l; i++) {
 		if (frame->locals.keys[i] == key) {
 			return &frame->locals.vals[i];
 		}
@@ -2539,7 +2540,7 @@ static item_t* uplocal(rela_vm* vm, const char* key) {
 			// only check this call stack frame if it belongs to another
 			// function from the current function's compile-time scope chain
 			if (pid == pids[i]) {
-				for (int i = 0; i < uframe->locals.depth; i++) {
+				for (int i = 0, l = uframe->locals.depth; i < l; i++) {
 					if (uframe->locals.keys[i] == key) {
 						return &uframe->locals.vals[i];
 					}
@@ -2555,7 +2556,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	cor_t* cor = vm->routine;
 
 	// OP_ASSIGN is used for too many things: local variables, map literal keys, global keys
-	map_t* map = vec_size(vm, &vm->routine->maps) ? vec_top(vm, &vm->routine->maps).map: NULL;
+	map_t* map = vm->routine->map.type == MAP ? vm->routine->map.map: NULL;
 
 	if (!map && cor->frames.depth) {
 		assert(key.type == STRING);
@@ -2960,11 +2961,13 @@ static void op_assert(rela_vm* vm) {
 static void op_fname(rela_vm* vm) {
 	item_t key = literal(vm);
 	item_t* val = find(vm, key);
+	if (val) {
+		push(vm, *val);
+		return;
+	}
 
 	char tmp[STRTMP];
-	ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
-
-	push(vm, *val);
+	ensure(vm, false, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 }
 
 static void op_gname(rela_vm* vm) {
@@ -2977,15 +2980,17 @@ static void op_cfunc(rela_vm* vm) {
 	item_t* cache = &vm->cache.cfunc[*cache_slot(vm)];
 	if (cache->type == SUBROUTINE || cache->type == CALLBACK) {
 		call(vm, *cache);
+		return;
 	}
-	else {
-		item_t key = literal(vm);
-		item_t* val = find(vm, key);
-		char tmp[STRTMP];
-		ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+	item_t key = literal(vm);
+	item_t* val = find(vm, key);
+	if (val) {
 		*cache = *val;
 		call(vm, *cache);
+		return;
 	}
+	char tmp[STRTMP];
+	ensure(vm, false, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 }
 
 // compression of mark,lit,lit,assign,limit0
@@ -3256,12 +3261,10 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 		ensure(vm, modlist[mod] < vec_size(vm, &vm->modules.entries), "invalid module %d", modlist[mod]);
 		vm->routine->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
 
-		for (;;) {
+		for (bool run = true; run; ) {
 			int ip = vm->routine->ip++;
 			assert(ip >= 0 && ip < vm->code.depth);
-
 			int opcode = vm->code.cells[ip].op;
-			if (opcode == OP_STOP) break;
 
 			#ifdef TRACE
 				code_t* c = &vm->code.cells[ip];
@@ -3273,16 +3276,25 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 				fflush(stderr);
 			#endif
 
-			for (;;) {
-				if (opcode == OP_JMP) { op_jmp(vm); break; }
-				if (opcode == OP_FOR) { op_for(vm); break; }
-				if (opcode == OP_PID) { op_pid(vm); break; }
-				if (opcode == OP_LIT) { op_lit(vm); break; }
-				if (opcode == OP_MARK) { op_mark(vm); break; }
-				if (opcode == OP_LIMIT) { op_limit(vm); break; }
-				if (opcode == OP_CLEAN) { op_clean(vm); break; }
-				if (opcode == OP_RETURN) { op_return(vm); break; }
-				funcs[opcode].func(vm); break;
+			switch (opcode) {
+				// <order-important>
+				case OP_STOP: { run = false; break; }
+				case OP_JMP: { op_jmp(vm); break; }
+				case OP_FOR: { op_for(vm); break; }
+				case OP_PID: { op_pid(vm); break; }
+				case OP_LIT: { op_lit(vm); break; }
+				case OP_MARK: { op_mark(vm); break; }
+				case OP_LIMIT: { op_limit(vm); break; }
+				case OP_CLEAN: { op_clean(vm); break; }
+				case OP_RETURN: { op_return(vm); break; }
+				case OPP_FNAME: { op_fname(vm); break; }
+				case OPP_CFUNC: { op_cfunc(vm); break; }
+				case OPP_ASSIGNL: { op_assignl(vm); break; }
+				case OPP_ASSIGNP: { op_assignp(vm); break; }
+				case OPP_MUL_LIT: { op_mul_lit(vm); break; }
+				case OPP_ADD_LIT: { op_add_lit(vm); break; }
+				// </order-important>
+				default: funcs[opcode].func(vm); break;
 			}
 
 			#ifdef TRACE
