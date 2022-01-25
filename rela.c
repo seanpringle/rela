@@ -43,10 +43,10 @@
 #endif
 
 enum opcode_t {
-	// <order important>
+	// <order-important>
 	OP_STOP=0, OP_JMP, OP_FOR, OP_PID, OP_LIT, OP_MARK, OP_LIMIT, OP_CLEAN, OP_RETURN,
 	OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT, OPP_GNAME, OPP_COPIES,
-	// </order important>
+	// </order-important>
 	OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_GLOBAL, OP_MAP, OP_VECTOR,
 	OP_UNMAP, OP_LOOP, OP_UNLOOP, OP_BREAK, OP_CONTINUE, OP_JFALSE,
 	OP_JTRUE, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_ASSIGN, OP_AND, OP_OR,
@@ -93,7 +93,7 @@ struct _node_t;
 typedef struct {
 	enum type_t type;
 	union {
-		int flag;
+		bool flag;
 		int sub;
 		int64_t inum;
 		double fnum;
@@ -118,13 +118,14 @@ typedef struct _map_t {
 	vec_t vals;
 } map_t;
 
+// powers of 2
 #define STACK 32u
 #define LOCALS 32u
 #define PATH 8u
 
 typedef struct {
-	int loops;
-	int marks;
+	int16_t loops;
+	int16_t marks;
 	int ip;
 	item_t map;
 	struct {
@@ -152,15 +153,15 @@ typedef struct _cor_t {
 		int depth;
 	} other;
 	struct {
-		frame_t cells[32];
+		frame_t cells[STACK];
 		int depth;
 	} frames;
 	struct {
-		int cells[32];
+		int cells[STACK];
 		int depth;
 	} marks;
 	struct {
-		int cells[32];
+		int cells[STACK];
 		int depth;
 	} loops;
 	item_t map;
@@ -179,10 +180,6 @@ typedef struct _node_t {
 	item_t item;
 	struct _node_t *args;
 	struct _node_t *chain;
-	bool index;
-	bool field;
-	bool control;
-	bool single;
 	vec_t* keys;
 	vec_t* vals;
 	int results;
@@ -191,6 +188,10 @@ typedef struct _node_t {
 		int ids[PATH];
 		int depth;
 	} fpath;
+	bool index;
+	bool field;
+	bool control;
+	bool single;
 } node_t; // AST
 
 typedef struct {
@@ -472,7 +473,7 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 		vm->cors.mark[index] = true;
 	}
 
-	for (uint32_t i = 0, l = cor->stack.depth; i < l; i++)
+	for (unsigned int i = 0, l = cor->stack.depth; i < l; i++)
 		gc_mark_item(vm, cor->stack.pages[i/STACK][i%STACK]);
 
 	for (int i = 0, l = cor->other.depth; i < l; i++)
@@ -816,7 +817,7 @@ static int str_scan(const char *source, strcb cb) {
 
 static void reset(rela_vm* vm) {
 	vm->scope_global = NULL;
-	while (vec_size(vm, &vm->routines)) vec_pop(vm, &vm->routines);
+	vm->routines.count = 0;
 	vm->routine = NULL;
 	free(vm->cache.cfunc);
 	vm->cache.cfunc = NULL;
@@ -1076,8 +1077,8 @@ static int depth(rela_vm* vm) {
 }
 
 static item_t* stack_ref(rela_vm* vm, cor_t* routine, int index) {
-	uint32_t page = ((uint32_t)index)/STACK;
-	uint32_t cell = ((uint32_t)index)-(page*STACK);
+	unsigned int page = ((unsigned int)index)/STACK;
+	unsigned int cell = ((unsigned int)index)-(page*STACK);
 	return &routine->stack.pages[page][cell];
 }
 
@@ -1636,8 +1637,8 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 		}
 
 		// shunting yard
-		operator_t *operations[32];
-		node_t *arguments[32];
+		operator_t *operations[STACK];
+		node_t *arguments[STACK];
 
 		int operation = 0;
 		int argument = 0;
@@ -1798,13 +1799,11 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 			// vecmap[fn()]
 			if (node->index) {
 				compile(vm, OP_MARK, nil(vm));
-//					compile(vm, OP_MARK, nil(vm));
-						if (node->args)
-							process(vm, node->args, 0, 0, -1);
-						compile(vm, OP_LIT, node->item);
-						compile(vm, OP_FIND, nil(vm));
-						compile(vm, OP_CALL, nil(vm));
-//					compile(vm, OP_LIMIT, integer(vm, -1));
+					if (node->args)
+						process(vm, node->args, 0, 0, -1);
+					compile(vm, OP_LIT, node->item);
+					compile(vm, OP_FIND, nil(vm));
+					compile(vm, OP_CALL, nil(vm));
 				compile(vm, OP_LIMIT, integer(vm, 1));
 				compile(vm, OP_GET, nil(vm));
 			}
@@ -2146,7 +2145,6 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		if (node->args)
 			process(vm, node->args, 0, 0, -1);
 
-//		compile(vm, OP_MARK, nil(vm));
 		int loop = compile(vm, OP_LOOP, nil(vm));
 
 		int begin = vm->code.depth;
@@ -2164,7 +2162,6 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		compiled(vm, loop)->item = integer(vm, vm->code.depth);
 		compile(vm, OP_UNLOOP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 0));
-//		compile(vm, OP_LIMIT, integer(vm, 0));
 
 		ensure(vm, !assigning, "cannot assign to for block");
 	}
@@ -3273,10 +3270,8 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 
 	int wtf = setjmp(vm->jmp);
 	if (wtf) {
-		//char tmp[STRTMP];
 		fprintf(stderr, "%s (", vm->err);
-		fprintf(stderr, "ip %d ", vec_size(vm, &vm->routines) ? vm->routine->ip: -1);
-//		fprintf(stderr, "stack %s", vec_size(vm, &vm->routines) ? tmptext(vm, (item_t){.type = VECTOR, .vec = stack(vm)}, tmp, sizeof(tmp)): "(no routine)");
+		fprintf(stderr, "ip %d", vec_size(vm, &vm->routines) ? vm->routine->ip: -1);
 		fprintf(stderr, ")\n");
 		reset(vm);
 		return wtf;
