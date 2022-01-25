@@ -1297,7 +1297,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 			if (peek(&source[offset], "if")) {
 				offset += 2;
 				node->type = NODE_IF;
-//breaks ternary				node->control = true;
+				node->control = false; // true breaks ternary
 
 				// conditions
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
@@ -2186,8 +2186,8 @@ static int64_t literal_int(rela_vm* vm) {
 	return lit.type == INTEGER ? lit.inum: 0;
 }
 
-static int cache_slot(rela_vm* vm) {
-	return vm->code.cells[vm->routine->ip-1].cache;
+static int* cache_slot(rela_vm* vm) {
+	return &vm->code.cells[vm->routine->ip-1].cache;
 }
 
 static void op_stop (rela_vm* vm) {
@@ -2557,24 +2557,16 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 		}
 		return;
 	}
-
 	map_set(vm, map ? map: vm->scope_global, key, val);
 }
 
-static bool find(rela_vm* vm, item_t key, item_t* val) {
+static item_t* find(rela_vm* vm, item_t key) {
 	assert(key.type == STRING);
 	item_t* cell = local(vm, key.str);
 	if (!cell) cell = uplocal(vm, key.str);
-
-	if (cell) {
-		*val = *cell;
-		return true;
-	}
-
-	if (map_get(vm, vm->scope_global, key, val)) return true;
-	if (map_get(vm, vm->scope_core, key, val)) return true;
-
-	return false;
+	if (!cell) cell = map_ref(vm, vm->scope_global, key);
+	if (!cell) cell = map_ref(vm, vm->scope_core, key);
+	return cell;
 }
 
 static void op_assign(rela_vm* vm) {
@@ -2589,12 +2581,12 @@ static void op_assign(rela_vm* vm) {
 
 static void op_find(rela_vm* vm) {
 	item_t key = pop(vm);
-	item_t val = nil(vm);
+	item_t* val = find(vm, key);
 
 	char tmp[STRTMP];
-	ensure(vm, find(vm, key, &val), "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+	ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 
-	push(vm, val);
+	push(vm, *val);
 }
 
 static void op_for(rela_vm* vm) {
@@ -2954,12 +2946,12 @@ static void op_assert(rela_vm* vm) {
 
 static void op_fname(rela_vm* vm) {
 	item_t key = literal(vm);
-	item_t val = nil(vm);
+	item_t* val = find(vm, key);
 
 	char tmp[STRTMP];
-	ensure(vm, find(vm, key, &val), "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+	ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 
-	push(vm, val);
+	push(vm, *val);
 }
 
 static void op_gname(rela_vm* vm) {
@@ -2969,14 +2961,17 @@ static void op_gname(rela_vm* vm) {
 }
 
 static void op_cfunc(rela_vm* vm) {
-	item_t* cache = &vm->cache.cfunc[cache_slot(vm)];
+	item_t* cache = &vm->cache.cfunc[*cache_slot(vm)];
 	if (cache->type == SUBROUTINE || cache->type == CALLBACK) {
 		call(vm, *cache);
 	}
 	else {
-		op_fname(vm);
-		*cache = top(vm);
-		op_call(vm);
+		item_t key = literal(vm);
+		item_t* val = find(vm, key);
+		char tmp[STRTMP];
+		ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+		*cache = *val;
+		call(vm, *cache);
 	}
 }
 
