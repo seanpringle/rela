@@ -118,7 +118,7 @@ typedef struct _map_t {
 	vec_t vals;
 } map_t;
 
-#define LOCALS 16
+#define LOCALS 32
 #define PATH 8
 
 typedef struct {
@@ -2519,7 +2519,7 @@ static item_t* local(rela_vm* vm, const char* key) {
 	return NULL;
 }
 
-// locate a local variable cell in an outer frame
+// locate a local variable in-scope in an outer frame
 static item_t* uplocal(rela_vm* vm, const char* key) {
 	cor_t* cor = vm->routine;
 	if (cor->frames.depth < 2) return NULL;
@@ -2863,8 +2863,8 @@ static void op_log10(rela_vm* vm) { item_t a = pop_type(vm, FLOAT); a.fnum = log
 
 static void op_abs(rela_vm* vm) {
 	item_t a = pop(vm);
-	if (a.type == INTEGER) a.inum = abs(a.inum);
-	else if (a.type == FLOAT) a.fnum = abs(a.fnum);
+	if (a.type == INTEGER) a.inum = a.inum < 0 ? -a.inum: a.inum;
+	else if (a.type == FLOAT) a.fnum = a.fnum < 0.0 ? -a.fnum: a.fnum;
 	else ensure(vm, 0, "op_abs invalid type");
 	push(vm, a);
 }
@@ -2964,6 +2964,7 @@ static void op_assert(rela_vm* vm) {
 static void op_fname(rela_vm* vm) {
 	item_t key = literal(vm);
 	item_t* val = find(vm, key);
+
 	if (val) {
 		push(vm, *val);
 		return;
