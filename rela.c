@@ -116,20 +116,25 @@ typedef struct _map_t {
 	vec_t vals;
 } map_t;
 
+#define LOCALS 16
+
 typedef struct {
-	int locals;
 	int paths;
 	int loops;
 	int marks;
 	int ip;
 	int maps;
+	struct {
+		const char* keys[LOCALS];
+		item_t vals[LOCALS];
+		int depth;
+	} locals;
 } frame_t;
 
 typedef struct _cor_t {
 	vec_t stack;  // arguments, results, opcode working
 	vec_t other;  // temporary data moved off stack
 	vec_t maps;   // map literals during construction
-	vec_t locals; // local variable key/val pairs
 	int ip;
 	int state;
 	struct {
@@ -380,10 +385,12 @@ static int parse_arglist(rela_vm* vm, const char *source);
 static int parse_node(rela_vm* vm, const char *source);
 
 #ifdef NDEBUG
-#define ensure(vm,c,...) if (!(c)) { snprintf(vm->err, sizeof(vm->err), __VA_ARGS__); longjmp(vm->jmp, 1); }
+void explode(rela_vm* vm) { longjmp(vm->jmp, 1); }
 #else
-#define ensure(vm,c,...) if (!(c)) { snprintf(vm->err, sizeof(vm->err), __VA_ARGS__); raise(SIGUSR1); }
+void explode(rela_vm* vm) { raise(SIGUSR1); }
 #endif
+
+#define ensure(vm,c,...) if (!(c)) { snprintf(vm->err, sizeof(vm->err), __VA_ARGS__); explode(vm); }
 
 #define RESULTS_DISCARD 0
 #define RESULTS_FIRST 1
@@ -455,7 +462,12 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	gc_mark_vec(vm, &cor->stack);
 	gc_mark_vec(vm, &cor->other);
 	gc_mark_vec(vm, &cor->maps);
-	gc_mark_vec(vm, &cor->locals);
+	for (int i = 0, l = cor->frames.depth; i < l; i++) {
+		frame_t* frame = &cor->frames.cells[i];
+		for (int j = 0; j < frame->locals.depth; j++) {
+			gc_mark_item(vm, frame->locals.vals[j]);
+		}
+	}
 }
 
 // A naive mark-and-sweep collector that is never called implicitly
@@ -503,7 +515,6 @@ static void gc(rela_vm* vm) {
 			free(cor->stack.items);
 			free(cor->other.items);
 			free(cor->maps.items);
-			free(cor->locals.items);
 			pool_free(&vm->cors, cor);
 		}
 	}
@@ -2250,11 +2261,12 @@ static void arrive(rela_vm* vm, int ip) {
 	assert(cor->frames.depth < sizeof(cor->frames.cells)/sizeof(frame_t));
 	frame_t* frame = &cor->frames.cells[cor->frames.depth++];
 
-	frame->locals = vec_size(vm, &cor->locals);
 	frame->paths = cor->paths.depth;
 	frame->loops = cor->loops.depth;
 	frame->marks = cor->marks.depth;
 	frame->ip = cor->ip;
+
+	frame->locals.depth = 0;
 
 	frame->maps = vec_size(vm, &cor->maps);
 	for (int i = 0, l = frame->maps; i < l; i++)
@@ -2273,7 +2285,6 @@ static void depart(rela_vm* vm) {
 	cor->marks.depth = frame->marks;
 	cor->loops.depth = frame->loops;
 	cor->paths.depth = frame->paths;
-	vec_shrink(vm, &cor->locals, frame->locals);
 
 	for (int i = 0, l = frame->maps; i < l; i++)
 		vec_push(vm, &cor->maps, vec_pop(vm, &cor->other));
@@ -2498,9 +2509,9 @@ static item_t* local(rela_vm* vm, const char* key) {
 	if (!cor->frames.depth) return NULL;
 	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
 
-	for (int cell = frame->locals, last = vec_size(vm, &cor->locals); cell < last; cell += 2) {
-		if (vec_cell(vm, &cor->locals, cell)->str == key) {
-			return vec_cell(vm, &cor->locals, cell+1);
+	for (int i = 0; i < frame->locals.depth; i++) {
+		if (frame->locals.keys[i] == key) {
+			return &frame->locals.vals[i];
 		}
 	}
 	return NULL;
@@ -2519,7 +2530,6 @@ static item_t* uplocal(rela_vm* vm, const char* key) {
 	assert(depth >= 1);
 
 	while (depth > 1 && index > 0) {
-		frame_t* nframe = &cor->frames.cells[index];
 		frame_t* uframe = &cor->frames.cells[--index];
 
 		int pid = cor->paths.cells[uframe->paths];
@@ -2529,9 +2539,9 @@ static item_t* uplocal(rela_vm* vm, const char* key) {
 			// only check this call stack frame if it belongs to another
 			// function from the current function's compile-time scope chain
 			if (pid == pids[i]) {
-				for (int cell = uframe->locals, last = nframe->locals; cell < last; cell += 2) {
-					if (vec_cell(vm, &cor->locals, cell)->str == key) {
-						return vec_cell(vm, &cor->locals, cell+1);
+				for (int i = 0; i < uframe->locals.depth; i++) {
+					if (uframe->locals.keys[i] == key) {
+						return &uframe->locals.vals[i];
 					}
 				}
 				break;
@@ -2550,11 +2560,14 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	if (!map && cor->frames.depth) {
 		assert(key.type == STRING);
 		item_t* cell = local(vm, key.str);
-		if (cell) *cell = val;
-		else {
-			vec_push(vm, &cor->locals, key);
-			vec_push(vm, &cor->locals, val);
+		if (cell) {
+			*cell = val;
+			return;
 		}
+		frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+		ensure(vm, frame->locals.depth < LOCALS, "max %d locals per frame", LOCALS);
+		frame->locals.keys[frame->locals.depth] = key.str;
+		frame->locals.vals[frame->locals.depth++] = val;
 		return;
 	}
 	map_set(vm, map ? map: vm->scope_global, key, val);
