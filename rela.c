@@ -119,9 +119,9 @@ typedef struct _map_t {
 } map_t;
 
 #define LOCALS 16
+#define PATH 8
 
 typedef struct {
-	int paths;
 	int loops;
 	int marks;
 	int ip;
@@ -131,6 +131,10 @@ typedef struct {
 		item_t vals[LOCALS];
 		int depth;
 	} locals;
+	struct {
+		int cells[PATH];
+		int depth;
+	} path;
 } frame_t;
 
 typedef struct _cor_t {
@@ -146,10 +150,6 @@ typedef struct _cor_t {
 		int cells[32];
 		int depth;
 	} marks;
-	struct {
-		int cells[8];
-		int depth;
-	} paths;
 	struct {
 		int cells[32];
 		int depth;
@@ -179,7 +179,7 @@ typedef struct _node_t {
 	int results;
 	struct {
 		int id;
-		int ids[8];
+		int ids[PATH];
 		int depth;
 	} fpath;
 } node_t; // AST
@@ -365,7 +365,7 @@ typedef struct _rela_vm {
 	// compile-time scope tree
 	struct {
 		int id;
-		int ids[8];
+		int ids[PATH];
 		int depth;
 	} fpath;
 
@@ -1369,7 +1369,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 				node->type = NODE_FUNCTION;
 				node->control = true;
 
-				ensure(vm, vm->fpath.depth < sizeof(vm->fpath.ids)/sizeof(vm->fpath.ids[0]), "reached function nest limit(%ld)", sizeof(vm->fpath.ids)/sizeof(vm->fpath.ids[0]));
+				ensure(vm, vm->fpath.depth < PATH, "reached function nest limit(%d)", PATH);
 
 				memmove(node->fpath.ids, vm->fpath.ids, vm->fpath.depth*sizeof(int));
 				node->fpath.depth = vm->fpath.depth;
@@ -2264,12 +2264,12 @@ static void arrive(rela_vm* vm, int ip) {
 	assert(cor->frames.depth < sizeof(cor->frames.cells)/sizeof(frame_t));
 	frame_t* frame = &cor->frames.cells[cor->frames.depth++];
 
-	frame->paths = cor->paths.depth;
 	frame->loops = cor->loops.depth;
 	frame->marks = cor->marks.depth;
 	frame->ip = cor->ip;
 
 	frame->locals.depth = 0;
+	frame->path.depth = 0;
 
 	frame->map = cor->map;
 	cor->map = nil(vm);
@@ -2286,7 +2286,6 @@ static void depart(rela_vm* vm) {
 	cor->ip = frame->ip;
 	cor->marks.depth = frame->marks;
 	cor->loops.depth = frame->loops;
-	cor->paths.depth = frame->paths;
 
 	cor->map = frame->map;
 }
@@ -2494,8 +2493,10 @@ static void op_unpack(rela_vm* vm) {
 }
 
 static void op_pid(rela_vm* vm) {
-	assert(vm->routine->paths.depth < sizeof(vm->routine->paths.cells)/sizeof(int));
-	vm->routine->paths.cells[vm->routine->paths.depth++] = literal(vm).inum;
+	assert(vm->routine->frames.depth);
+	frame_t* frame = &vm->routine->frames.cells[vm->routine->frames.depth-1];
+	// depth++ range is capped at compile time
+	frame->path.cells[frame->path.depth++] = literal(vm).inum;
 }
 
 static void op_type(rela_vm* vm) {
@@ -2526,14 +2527,15 @@ static item_t* uplocal(rela_vm* vm, const char* key) {
 	int index = cor->frames.depth;
 	frame_t* lframe = &cor->frames.cells[--index];
 
-	int* pids = &cor->paths.cells[lframe->paths];
-	int depth = cor->paths.depth - lframe->paths;
+	int* pids = lframe->path.cells;
+	int depth = lframe->path.depth;
 	assert(depth >= 1);
 
 	while (depth > 1 && index > 0) {
 		frame_t* uframe = &cor->frames.cells[--index];
 
-		int pid = cor->paths.cells[uframe->paths];
+		assert(uframe->path.depth);
+		int pid = uframe->path.cells[0];
 
 		// i=1 to skip checking outer recursive calls to current function
 		for (int i = 1, l = depth; i < l; i++) {
@@ -2566,6 +2568,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 			return;
 		}
 		frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+		// todo: depth++ range limit at compile time
 		ensure(vm, frame->locals.depth < LOCALS, "max %d locals per frame", LOCALS);
 		frame->locals.keys[frame->locals.depth] = key.str;
 		frame->locals.vals[frame->locals.depth++] = val;
