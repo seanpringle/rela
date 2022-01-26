@@ -34,7 +34,6 @@ extern "C" {
 struct _rela_vm;
 typedef struct _rela_vm rela_vm;
 
-// @return number of relevant stack items
 typedef void (*rela_callback)(rela_vm* rela);
 
 typedef struct {

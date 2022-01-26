@@ -124,8 +124,8 @@ typedef struct _map_t {
 #define PATH 8u
 
 typedef struct {
-	int16_t loops;
-	int16_t marks;
+	int loops;
+	int marks;
 	int ip;
 	item_t map;
 	struct {
