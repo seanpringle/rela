@@ -3353,6 +3353,10 @@ void rela_collect(rela_vm* vm) {
 	gc(vm);
 }
 
+const char* rela_error(rela_vm* vm) {
+	return vm->err;
+}
+
 size_t rela_depth(rela_vm* vm) {
 	return depth(vm);
 }
