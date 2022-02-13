@@ -1,0 +1,41 @@
+
+methods = {
+	"==" = function(a, b)
+		return a[0] == b[0] && a[1] == b[1]
+	end,
+
+	first = function(self)
+		return self[0]
+	end,
+}
+
+objA = [1,2,3]
+objB = [1,2,4]
+
+lib.setmeta(objA, methods)
+lib.setmeta(objB, methods)
+
+lib.assert(lib.getmeta(objA) == methods)
+lib.assert(lib.getmeta(objB) == methods)
+
+lib.assert(objA == objB)
+
+lib.assert(objA:first() == 1)
+
+function callback(operation)
+	if operation == "=="
+		return function(a, b)
+			return a[0] == b[0] && a[2] == b[2]
+		end
+	end
+	return nil
+end
+
+objC = [1,2,4]
+
+lib.setmeta(objC, callback)
+
+lib.assert(lib.getmeta(objC) == callback)
+lib.assert(objC == objB)
+
+

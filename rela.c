@@ -48,8 +48,8 @@ enum opcode_t {
 	OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT, OPP_GNAME, OPP_COPIES,
 	// </order-important>
 	OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_GLOBAL, OP_MAP, OP_VECTOR,
-	OP_UNMAP, OP_LOOP, OP_UNLOOP, OP_BREAK, OP_CONTINUE, OP_JFALSE,
-	OP_JTRUE, OP_NIL, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_ASSIGN, OP_AND, OP_OR,
+	OP_META_SET, OP_META_GET, OP_UNMAP, OP_LOOP, OP_UNLOOP, OP_BREAK, OP_CONTINUE, OP_JFALSE,
+	OP_JTRUE, OP_NIL, OP_COPY, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_ASSIGN, OP_AND, OP_OR,
 	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
 	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_GC,
 	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
@@ -89,6 +89,7 @@ struct _vec_t;
 struct _map_t;
 struct _cor_t;
 struct _node_t;
+struct _data_t;
 
 typedef struct {
 	enum type_t type;
@@ -102,21 +103,28 @@ typedef struct {
 		struct _map_t* map;
 		struct _cor_t* cor;
 		struct _node_t* node;
+		struct _data_t* data;
 		rela_callback cb;
-		void* data;
 	};
 } item_t;
 
 typedef struct _vec_t {
+	item_t meta;
 	item_t* items;
 	int count;
 	int buffer;
 } vec_t; // vector
 
 typedef struct _map_t {
+	item_t meta;
 	vec_t keys;
 	vec_t vals;
 } map_t;
+
+typedef struct _data_t {
+	item_t meta;
+	void* ptr;
+} data_t; // vector
 
 // powers of 2
 #define STACK 32u
@@ -190,6 +198,7 @@ typedef struct _node_t {
 	} fpath;
 	bool index;
 	bool field;
+	bool method;
 	bool control;
 	bool single;
 } node_t; // AST
@@ -350,6 +359,7 @@ typedef struct _rela_vm {
 	pool_t maps;
 	pool_t vecs;
 	pool_t cors;
+	pool_t data;
 
 	// compiled "bytecode"
 	struct {
@@ -389,12 +399,16 @@ typedef int (*strcb)(int);
 static item_t nil(rela_vm* vm);
 static bool equal(rela_vm* vm, item_t a, item_t b);
 static bool less(rela_vm* vm, item_t a, item_t b);
+static void push(rela_vm* vm, item_t item);
+static item_t pop(rela_vm* vm);
+static item_t top(rela_vm* vm);
 static const char* tmptext(rela_vm* vm, item_t item, char* tmp, int size);
 static int parse(rela_vm* vm, const char *source, int results, int mode);
 static int parse_block(rela_vm* vm, const char *source, node_t *node);
 static int parse_branch(rela_vm* vm, const char *source, node_t *node);
 static int parse_arglist(rela_vm* vm, const char *source);
 static int parse_node(rela_vm* vm, const char *source);
+static void method(rela_vm* vm, item_t item, int argc, item_t* argv, int retc, item_t* retv);
 
 #ifdef NDEBUG
 void explode(rela_vm* vm) { longjmp(vm->jmp, 1); }
@@ -428,12 +442,15 @@ static void gc_mark_vec(rela_vm* vm, vec_t* vec);
 static void gc_mark_map(rela_vm* vm, map_t* map);
 static void gc_mark_cor(rela_vm* vm, cor_t* cor);
 static void gc_mark_str(rela_vm* vm, const char* str);
+static void gc_mark_data(rela_vm* vm, data_t* data);
 
 static void gc_mark_item(rela_vm* vm, item_t item) {
 	if (item.type == STRING) gc_mark_str(vm, item.str);
 	if (item.type == VECTOR) gc_mark_vec(vm, item.vec);
 	if (item.type == MAP) gc_mark_map(vm, item.map);
 	if (item.type == COROUTINE) gc_mark_cor(vm, item.cor);
+	if (item.type == USERDATA && item.data->meta.type != NIL) gc_mark_item(vm, item.data->meta);
+	if (item.type == USERDATA) gc_mark_data(vm, item.data);
 }
 
 static void gc_mark_str(rela_vm* vm, const char* str) {
@@ -443,6 +460,7 @@ static void gc_mark_str(rela_vm* vm, const char* str) {
 
 static void gc_mark_vec(rela_vm* vm, vec_t* vec) {
 	if (!vec) return;
+	gc_mark_item(vm, vec->meta);
 	int index = pool_index(&vm->vecs, vec);
 	if (index >= 0) {
 		if (vm->vecs.mark[index]) return;
@@ -455,6 +473,7 @@ static void gc_mark_vec(rela_vm* vm, vec_t* vec) {
 
 static void gc_mark_map(rela_vm* vm, map_t* map) {
 	if (!map) return;
+	gc_mark_item(vm, map->meta);
 	int index = pool_index(&vm->maps, map);
 	if (index >= 0) {
 		if (vm->maps.mark[index]) return;
@@ -489,6 +508,15 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	}
 }
 
+static void gc_mark_data(rela_vm* vm, data_t* data) {
+	if (!data) return;
+	int index = pool_index(&vm->data, data);
+	if (index >= 0) {
+		if (vm->data.mark[index]) return;
+		vm->data.mark[index] = true;
+	}
+}
+
 // A naive mark-and-sweep collector that is never called implicitly
 // at run-time. Can be explicitly triggered with "collect()" via
 // script or with rela_collect() via callback.
@@ -496,6 +524,7 @@ static void gc(rela_vm* vm) {
 	memset(vm->maps.mark, 0, sizeof(bool)*vm->maps.depth);
 	memset(vm->vecs.mark, 0, sizeof(bool)*vm->vecs.depth);
 	memset(vm->cors.mark, 0, sizeof(bool)*vm->cors.depth);
+	memset(vm->data.mark, 0, sizeof(bool)*vm->data.depth);
 	vm->stringsA.mark = calloc(sizeof(bool),vm->stringsA.depth);
 
 	gc_mark_map(vm, vm->scope_core);
@@ -528,6 +557,13 @@ static void gc(rela_vm* vm) {
 		}
 	}
 
+	for (int i = 0, l = vm->data.depth; i < l; i++) {
+		if (vm->data.used[i] && !vm->data.mark[i]) {
+			data_t* data = pool_ptr(&vm->data, i);
+			pool_free(&vm->data, data);
+		}
+	}
+
 	for (int i = 0, l = vm->cors.depth; i < l; i++) {
 		if (vm->cors.used[i] && !vm->cors.mark[i]) {
 			cor_t* cor = pool_ptr(&vm->cors, i);
@@ -556,6 +592,10 @@ static vec_t* vec_allot(rela_vm* vm) {
 
 static map_t* map_allot(rela_vm* vm) {
 	return pool_alloc(&vm->maps);
+}
+
+static data_t* data_allot(rela_vm* vm) {
+	return pool_alloc(&vm->data);
 }
 
 static cor_t* cor_allot(rela_vm* vm) {
@@ -840,34 +880,6 @@ static item_t string(rela_vm* vm, const char* s) {
 	return (item_t){.type = STRING, .str = strintern(vm, s) };
 }
 
-static bool equal(rela_vm* vm, item_t a, item_t b) {
-	if (a.type == b.type) {
-		if (a.type == INTEGER) return a.inum == b.inum;
-		if (a.type == FLOAT) return fabs(a.fnum - b.fnum) < DBL_EPSILON*10;
-		if (a.type == STRING) return a.str == b.str; // .str must use strintern
-		if (a.type == BOOLEAN) return a.flag == b.flag;
-		if (a.type == VECTOR) return a.vec == b.vec;
-		if (a.type == MAP) return a.map == b.map;
-		if (a.type == SUBROUTINE) return a.sub == b.sub;
-		if (a.type == COROUTINE) return a.cor == b.cor;
-		if (a.type == USERDATA) return a.data == b.data;
-		if (a.type == NODE) return a.node == b.node;
-		if (a.type == NIL) return true;
-	}
-	return false;
-}
-
-static bool less(rela_vm* vm, item_t a, item_t b) {
-	if (a.type == b.type) {
-		if (a.type == INTEGER) return a.inum < b.inum;
-		if (a.type == FLOAT) return a.fnum < b.fnum;
-		if (a.type == STRING) return a.str != b.str && strcmp(a.str, b.str) < 0;
-		if (a.type == VECTOR) return vec_size(vm, a.vec) < vec_size(vm, b.vec);
-		if (a.type == MAP) return vec_size(vm, &a.map->keys) < vec_size(vm, &b.map->keys);
-	}
-	return false;
-}
-
 static bool truth(rela_vm* vm, item_t a) {
 	if (a.type == INTEGER) return a.inum != 0;
 	if (a.type == FLOAT) return a.fnum > 0+DBL_EPSILON || a.fnum < 0-DBL_EPSILON;
@@ -883,41 +895,172 @@ static bool truth(rela_vm* vm, item_t a) {
 	return false;
 }
 
+static bool meta_get(rela_vm* vm, item_t meta, const char* name, item_t *func) {
+	if (meta.type == MAP) return map_get(vm, meta.map, string(vm, name), func);
+	if (meta.type == SUBROUTINE || meta.type == CALLBACK) {
+		item_t key = string(vm, name);
+		method(vm, meta, 1, &key, 1, func);
+		return func->type != NIL;
+	}
+	return false;
+}
+
+static bool equal(rela_vm* vm, item_t a, item_t b) {
+	item_t func;
+	item_t argv[2] = {a,b};
+	item_t retv[1];
+
+	if (a.type == b.type) {
+		if (a.type == INTEGER) return a.inum == b.inum;
+		if (a.type == FLOAT) return fabs(a.fnum - b.fnum) < DBL_EPSILON*10;
+		if (a.type == STRING) return a.str == b.str; // .str must use strintern
+		if (a.type == BOOLEAN) return a.flag == b.flag;
+		if (a.type == VECTOR && meta_get(vm, a.vec->meta, "==", &func)) {
+			method(vm, func, 2, argv, 1, retv);
+			return truth(vm, retv[0]);
+		}
+		if (a.type == VECTOR) return a.vec == b.vec;
+		if (a.type == MAP && meta_get(vm, a.map->meta, "==", &func)) {
+			method(vm, func, 2, argv, 1, retv);
+			return truth(vm, retv[0]);
+		}
+		if (a.type == MAP) return a.map == b.map;
+		if (a.type == SUBROUTINE) return a.sub == b.sub;
+		if (a.type == COROUTINE) return a.cor == b.cor;
+		if (a.type == USERDATA && meta_get(vm, a.data->meta, "==", &func)) {
+			method(vm, func, 2, argv, 1, retv);
+			return truth(vm, retv[0]);
+		}
+		if (a.type == USERDATA) return a.data == b.data;
+		if (a.type == NODE) return a.node == b.node;
+		if (a.type == NIL) return true;
+	}
+	return false;
+}
+
+static bool less(rela_vm* vm, item_t a, item_t b) {
+	item_t func;
+	item_t argv[2] = {a,b};
+	item_t retv[1];
+
+	if (a.type == b.type) {
+		if (a.type == INTEGER) return a.inum < b.inum;
+		if (a.type == FLOAT) return a.fnum < b.fnum;
+		if (a.type == STRING) return a.str != b.str && strcmp(a.str, b.str) < 0;
+		if (a.type == VECTOR && meta_get(vm, a.vec->meta, "<", &func)) {
+			method(vm, func, 2, argv, 1, retv);
+			return truth(vm, retv[0]);
+		}
+		if (a.type == VECTOR) return vec_size(vm, a.vec) < vec_size(vm, b.vec);
+		if (a.type == MAP && meta_get(vm, a.map->meta, "<", &func)) {
+			method(vm, func, 2, argv, 1, retv);
+			return truth(vm, retv[0]);
+		}
+		if (a.type == MAP) return vec_size(vm, &a.map->keys) < vec_size(vm, &b.map->keys);
+		if (a.type == USERDATA && meta_get(vm, a.data->meta, "<", &func)) {
+			method(vm, func, 2, argv, 1, retv);
+			return truth(vm, retv[0]);
+		}
+	}
+	return false;
+}
+
 static int count(rela_vm* vm, item_t a) {
+	item_t func;
+	item_t argv[1] = {a};
+	item_t retv[1];
+
 	if (a.type == INTEGER) return a.inum;
 	if (a.type == FLOAT) return floor(a.fnum);
 	if (a.type == STRING) return strlen(a.str);
 	if (a.type == VECTOR) return vec_size(vm, a.vec);
 	if (a.type == MAP) return vec_size(vm, &a.map->keys);
+	if (a.type == USERDATA && meta_get(vm, a.data->meta, "#", &func)) {
+		method(vm, func, 1, argv, 1, retv);
+		ensure(vm, retv[0].type == INTEGER, "meta method # should return an integer");
+		return retv[0].inum;
+	}
 	return 0;
 }
 
 static item_t add(rela_vm* vm, item_t a, item_t b) {
+	item_t func;
+	item_t argv[2] = {a,b};
+	item_t retv[1];
+
 	if (a.type == INTEGER && b.type == INTEGER) return (item_t){.type = INTEGER, .inum = a.inum + b.inum};
 	if (a.type == INTEGER && b.type == FLOAT) return (item_t){.type = INTEGER, .inum = a.inum + b.fnum};
 	if (a.type == FLOAT && b.type == INTEGER) return (item_t){.type = FLOAT, .fnum = a.fnum + b.inum};
 	if (a.type == FLOAT && b.type == FLOAT) return (item_t){.type = FLOAT, .fnum = a.fnum + b.fnum};
+	if (a.type == VECTOR && meta_get(vm, a.vec->meta, "+", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
+	if (a.type == MAP && meta_get(vm, a.map->meta, "+", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
+	if (a.type == USERDATA && meta_get(vm, a.data->meta, "+", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
 	return nil(vm);
 }
 
 static item_t multiply(rela_vm* vm, item_t a, item_t b) {
+	item_t func;
+	item_t argv[2] = {a,b};
+	item_t retv[1];
+
 	if (a.type == INTEGER && b.type == INTEGER) return (item_t){.type = INTEGER, .inum = a.inum * b.inum};
 	if (a.type == INTEGER && b.type == FLOAT) return (item_t){.type = INTEGER, .inum = a.inum * b.fnum};
 	if (a.type == FLOAT && b.type == INTEGER) return (item_t){.type = FLOAT, .fnum = a.fnum * b.inum};
 	if (a.type == FLOAT && b.type == FLOAT) return (item_t){.type = FLOAT, .fnum = a.fnum * b.fnum};
+	if (a.type == VECTOR && meta_get(vm, a.vec->meta, "*", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
+	if (a.type == MAP && meta_get(vm, a.map->meta, "*", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
+	if (a.type == USERDATA && meta_get(vm, a.data->meta, "*", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
 	return nil(vm);
 }
 
 static item_t divide(rela_vm* vm, item_t a, item_t b) {
+	item_t func;
+	item_t argv[2] = {a,b};
+	item_t retv[1];
+
 	if (a.type == INTEGER && b.type == INTEGER) return (item_t){.type = INTEGER, .inum = a.inum / b.inum};
 	if (a.type == INTEGER && b.type == FLOAT) return (item_t){.type = INTEGER, .inum = a.inum / b.fnum};
 	if (a.type == FLOAT && b.type == INTEGER) return (item_t){.type = FLOAT, .fnum = a.fnum / b.inum};
 	if (a.type == FLOAT && b.type == FLOAT) return (item_t){.type = FLOAT, .fnum = a.fnum / b.fnum};
+	if (a.type == VECTOR && meta_get(vm, a.vec->meta, "/", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
+	if (a.type == MAP && meta_get(vm, a.map->meta, "/", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
+	if (a.type == USERDATA && meta_get(vm, a.data->meta, "/", &func)) {
+		method(vm, func, 2, argv, 1, retv);
+		return retv[0];
+	}
 	return nil(vm);
 }
 
 static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	if (a.type == STRING) return a.str;
+
+	item_t func;
+	item_t argv[1] = {a};
+	item_t retv[1];
 
 	assert(a.type >= 0 && a.type < TYPES);
 
@@ -928,11 +1071,24 @@ static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 	if (a.type == SUBROUTINE) snprintf(tmp, size, "%s(%d)", type_names[a.type], a.sub);
 	if (a.type == COROUTINE) snprintf(tmp, size, "%s", type_names[a.type]);
 	if (a.type == CALLBACK) snprintf(tmp, size, "%s", type_names[a.type]);
-	if (a.type == USERDATA) snprintf(tmp, size, "%s", type_names[a.type]);
 	if (a.type == NODE) snprintf(tmp, size, "%s", type_names[a.type]);
+
+	if (a.type == USERDATA && meta_get(vm, a.data->meta, "$", &func)) {
+		method(vm, func, 1, argv, 1, retv);
+		ensure(vm, retv[0].type == STRING, "$ should return a string");
+		return retv[0].str;
+	}
+
+	if (a.type == USERDATA) snprintf(tmp, size, "%s", type_names[a.type]);
 
 	char subtmpA[STRTMP];
 	char subtmpB[STRTMP];
+
+	if (a.type == VECTOR && meta_get(vm, a.vec->meta, "$", &func)) {
+		method(vm, func, 1, argv, 1, retv);
+		ensure(vm, retv[0].type == STRING, "$ should return a string");
+		return retv[0].str;
+	}
 
 	if (a.type == VECTOR) {
 		int len = snprintf(tmp, size, "[");
@@ -942,6 +1098,12 @@ static const char* tmptext(rela_vm* vm, item_t a, char* tmp, int size) {
 			if (len < size && i < l-1) len += snprintf(tmp+len, size-len, ", ");
 		}
 		if (len < size) len += snprintf(tmp+len, size-len, "]");
+	}
+
+	if (a.type == MAP && meta_get(vm, a.map->meta, "$", &func)) {
+		method(vm, func, 1, argv, 1, retv);
+		ensure(vm, retv[0].type == STRING, "$ should return a string");
+		return retv[0].str;
 	}
 
 	if (a.type == MAP) {
@@ -1615,6 +1777,17 @@ static int parse_node(rela_vm* vm, const char *source) {
 			prev->field = true;
 			continue;
 		}
+
+		// chained map:field:subfield expressions
+		if (source[offset] == ':' && isnamefirst(source[offset+1])) {
+			offset++;
+			offset += parse_node(vm, &source[offset]);
+			prev->chain = pop(vm).node;
+			prev = prev->chain;
+			prev->field = true;
+			prev->method = true;
+			continue;
+		}
 		break;
 	}
 
@@ -1808,8 +1981,24 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 				compile(vm, OP_GET, nil(vm));
 			}
 
+			// :fn()
+			if (node->field && node->method) {
+				compile(vm, OP_COPY, nil(vm));
+				compile(vm, OP_LIT, node->item);
+				compile(vm, OP_GET, nil(vm));
+				compile(vm, OP_SHUNT, nil(vm));
+				compile(vm, OP_SHUNT, nil(vm));
+				compile(vm, OP_MARK, nil(vm));
+					compile(vm, OP_SHIFT, nil(vm));
+					if (node->args)
+						process(vm, node->args, 0, 0, -1);
+					compile(vm, OP_SHIFT, nil(vm));
+					compile(vm, OP_CALL, nil(vm));
+				compile(vm, OP_LIMIT, integer(vm, limit));
+			}
+
 			// .fn()
-			if (node->field) {
+			if (node->field && !node->method) {
 				compile(vm, OP_LIT, node->item);
 				compile(vm, OP_GET, nil(vm));
 				compile(vm, OP_SHUNT, nil(vm));
@@ -2254,6 +2443,49 @@ static void op_clean(rela_vm* vm) {
 	vm->routine->stack.depth -= depth(vm);
 }
 
+static void op_meta_set(rela_vm* vm) {
+	item_t meta = pop(vm);
+	item_t obj = pop(vm);
+
+	if (obj.type == VECTOR) {
+		obj.vec->meta = meta;
+		return;
+	}
+
+	if (obj.type == MAP) {
+		obj.map->meta = meta;
+		return;
+	}
+
+	if (obj.type == USERDATA) {
+		obj.data->meta = meta;
+		return;
+	}
+
+	ensure(vm, false, "cannot set meta");
+}
+
+static void op_meta_get(rela_vm* vm) {
+	item_t obj = pop(vm);
+
+	if (obj.type == VECTOR) {
+		push(vm, obj.vec->meta);
+		return;
+	}
+
+	if (obj.type == MAP) {
+		push(vm, obj.map->meta);
+		return;
+	}
+
+	if (obj.type == USERDATA) {
+		push(vm, obj.data->meta);
+		return;
+	}
+
+	push(vm, nil(vm));
+}
+
 static void op_map(rela_vm* vm) {
 	opush(vm, vm->routine->map);
 	vm->routine->map = (item_t){.type = MAP, .map = map_allot(vm)};
@@ -2458,6 +2690,10 @@ static void op_continue(rela_vm* vm) {
 	vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2]-1;
 	vm->routine->marks.depth = vm->routine->loops.cells[vm->routine->loops.depth-3];
 	while (depth(vm)) pop(vm);
+}
+
+static void op_copy(rela_vm* vm) {
+	push(vm, top(vm));
 }
 
 static void op_shunt(rela_vm* vm) {
@@ -2716,9 +2952,17 @@ static item_t get(rela_vm* vm, item_t src, item_t key) {
 		return vec_get(vm, src.vec, key.inum);
 	}
 	else
+	if (src.type == VECTOR && src.vec->meta.type != NIL && key.type == STRING) {
+		item_t val = nil(vm);
+		meta_get(vm, src.vec->meta, key.str, &val);
+		return val;
+	}
 	if (src.type == MAP) {
 		item_t val = nil(vm);
 		map_get(vm, src.map, key, &val);
+		if (val.type == NIL && src.map->meta.type != NIL && key.type == STRING) {
+			meta_get(vm, src.map->meta, key.str, &val);
+		}
 		return val;
 	}
 	else {
@@ -2804,7 +3048,7 @@ static void op_eq(rela_vm* vm) {
 }
 
 static void op_not(rela_vm* vm) {
-	push(vm, (item_t){.type = BOOLEAN, .flag = truth(vm, pop(vm)) == 0});
+	push(vm, (item_t){.type = BOOLEAN, .flag = !truth(vm, pop(vm))});
 }
 
 static void op_ne(rela_vm* vm) {
@@ -3057,6 +3301,8 @@ func_t funcs[OPERATIONS] = {
 	[OP_CALL]      = { .name = "call",      .lib = false, .func = op_call      },
 	[OP_RETURN]    = { .name = "return",    .lib = false, .func = op_return    },
 	[OP_GLOBAL]    = { .name = "global",    .lib = false, .func = op_global    },
+	[OP_META_SET]  = { .name = "setmeta",   .lib = true,  .func = op_meta_set  },
+	[OP_META_GET]  = { .name = "getmeta",   .lib = true,  .func = op_meta_get  },
 	[OP_VECTOR]    = { .name = "vector",    .lib = true,  .func = op_vector    },
 	[OP_MAP]       = { .name = "map",       .lib = false, .func = op_map       },
 	[OP_UNMAP]     = { .name = "unmap",     .lib = false, .func = op_unmap     },
@@ -3072,6 +3318,7 @@ func_t funcs[OPERATIONS] = {
 	[OP_JTRUE]     = { .name = "jtrue",     .lib = false, .func = op_jtrue     },
 	[OP_FOR]       = { .name = "for",       .lib = false, .func = op_for       },
 	[OP_NIL]       = { .name = "nil",       .lib = false, .func = op_nil       },
+	[OP_COPY]      = { .name = "copy",      .lib = false, .func = op_copy      },
 	[OP_SHUNT]     = { .name = "shunt",     .lib = false, .func = op_shunt     },
 	[OP_SHIFT]     = { .name = "shift",     .lib = false, .func = op_shift     },
 	[OP_TRUE]      = { .name = "true",      .lib = false, .func = op_true      },
@@ -3167,6 +3414,7 @@ static void destroy(rela_vm* vm) {
 	pool_clear(&vm->maps);
 	pool_clear(&vm->vecs);
 	pool_clear(&vm->cors);
+	pool_clear(&vm->data);
 
 	free(vm);
 }
@@ -3188,6 +3436,8 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 	vm->maps.object = sizeof(map_t);
 	vm->cors.page = 128;
 	vm->cors.object = sizeof(cor_t);
+	vm->data.page = 128;
+	vm->data.object = sizeof(data_t);
 
 	vm->custom = custom;
 	vm->scope_core = map_allot(vm);
@@ -3264,8 +3514,88 @@ int rela_run(rela_vm* vm) {
 	return rela_run_ex(vm, 1, (int[]){0});
 }
 
-int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
+static bool tick(rela_vm* vm) {
+	int ip = vm->routine->ip++;
+	assert(ip >= 0 && ip < vm->code.depth);
+	int opcode = vm->code.cells[ip].op;
 
+	#ifdef TRACE
+		code_t* c = &vm->code.cells[ip];
+		char tmpA[STRTMP];
+		const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
+		for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
+			fprintf(stderr, "  ");
+		fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
+		fflush(stderr);
+	#endif
+
+	switch (opcode) {
+		// <order-important>
+		case OP_STOP: { return false; break; }
+		case OP_JMP: { op_jmp(vm); break; }
+		case OP_FOR: { op_for(vm); break; }
+		case OP_PID: { op_pid(vm); break; }
+		case OP_LIT: { op_lit(vm); break; }
+		case OP_MARK: { op_mark(vm); break; }
+		case OP_LIMIT: { op_limit(vm); break; }
+		case OP_CLEAN: { op_clean(vm); break; }
+		case OP_RETURN: { op_return(vm); break; }
+		case OPP_FNAME: { op_fname(vm); break; }
+		case OPP_CFUNC: { op_cfunc(vm); break; }
+		case OPP_ASSIGNL: { op_assignl(vm); break; }
+		case OPP_ASSIGNP: { op_assignp(vm); break; }
+		case OPP_MUL_LIT: { op_mul_lit(vm); break; }
+		case OPP_ADD_LIT: { op_add_lit(vm); break; }
+		// </order-important>
+		default: funcs[opcode].func(vm); break;
+	}
+
+	#ifdef TRACE
+		fprintf(stderr, "[");
+		for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
+			if (i == l-depth(vm))
+				fprintf(stderr, "|");
+			char tmpB[STRTMP];
+			fprintf(stderr, "%s%s",
+				tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
+				(i < l-1 ? ", ":"")
+			);
+		}
+		fprintf(stderr, "]\n");
+		fflush(stderr);
+	#endif
+
+	return true;
+}
+
+static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, item_t* retv) {
+	ensure(vm, func.type == SUBROUTINE || func.type == CALLBACK, "invalid method");
+
+	cor_t* cor = vm->routine;
+	int frame = cor->frames.depth;
+
+	op_mark(vm);
+
+	for (int i = 0; i < argc; i++) push(vm, argv[i]);
+
+	call(vm, func);
+
+	if (func.type == SUBROUTINE) {
+		while (tick(vm)) {
+			if (vm->routine != cor) continue;
+			if (frame < cor->frames.depth) continue;
+			break;
+		}
+	}
+
+	for (int i = 0; i < retc; i++) {
+		retv[i] = i < depth(vm) ? *item(vm, i): nil(vm);
+	}
+
+	limit(vm, 0);
+}
+
+int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	vm->cache.cfunc = calloc(vm->cache.cfuncs, sizeof(item_t));
 
 	int wtf = setjmp(vm->jmp);
@@ -3284,58 +3614,7 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	for (int mod = 0; mod < modules; mod++) {
 		ensure(vm, modlist[mod] < vec_size(vm, &vm->modules.entries), "invalid module %d", modlist[mod]);
 		vm->routine->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
-
-		for (bool run = true; run; ) {
-			int ip = vm->routine->ip++;
-			assert(ip >= 0 && ip < vm->code.depth);
-			int opcode = vm->code.cells[ip].op;
-
-			#ifdef TRACE
-				code_t* c = &vm->code.cells[ip];
-				char tmpA[STRTMP];
-				const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
-				for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
-					fprintf(stderr, "  ");
-				fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
-				fflush(stderr);
-			#endif
-
-			switch (opcode) {
-				// <order-important>
-				case OP_STOP: { run = false; break; }
-				case OP_JMP: { op_jmp(vm); break; }
-				case OP_FOR: { op_for(vm); break; }
-				case OP_PID: { op_pid(vm); break; }
-				case OP_LIT: { op_lit(vm); break; }
-				case OP_MARK: { op_mark(vm); break; }
-				case OP_LIMIT: { op_limit(vm); break; }
-				case OP_CLEAN: { op_clean(vm); break; }
-				case OP_RETURN: { op_return(vm); break; }
-				case OPP_FNAME: { op_fname(vm); break; }
-				case OPP_CFUNC: { op_cfunc(vm); break; }
-				case OPP_ASSIGNL: { op_assignl(vm); break; }
-				case OPP_ASSIGNP: { op_assignp(vm); break; }
-				case OPP_MUL_LIT: { op_mul_lit(vm); break; }
-				case OPP_ADD_LIT: { op_add_lit(vm); break; }
-				// </order-important>
-				default: funcs[opcode].func(vm); break;
-			}
-
-			#ifdef TRACE
-				fprintf(stderr, "[");
-				for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
-					if (i == l-depth(vm))
-						fprintf(stderr, "|");
-					char tmpB[STRTMP];
-					fprintf(stderr, "%s%s",
-						tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
-						(i < l-1 ? ", ":"")
-					);
-				}
-				fprintf(stderr, "]\n");
-				fflush(stderr);
-			#endif
-		}
+		while (tick(vm));
 	}
 	reset(vm);
 	return 0;
@@ -3390,7 +3669,8 @@ rela_item rela_make_string(rela_vm* vm, const char* str) {
 	return rela_pop(vm);
 }
 
-rela_item rela_make_data(rela_vm* vm, void* data) {
+rela_item rela_make_data(rela_vm* vm, void* ptr) {
+	data_t* data = data_allot(vm); data->ptr = ptr;
 	push(vm, (item_t){.type = USERDATA, .data = data});
 	return rela_pop(vm);
 }
@@ -3405,6 +3685,11 @@ rela_item rela_make_map(rela_vm* vm) {
 	return rela_pop(vm);
 }
 
+rela_item rela_make_callback(rela_vm* vm, rela_callback cb) {
+	push(vm, (item_t){.type = CALLBACK, .cb = cb});
+	return rela_pop(vm);
+}
+
 rela_item rela_pop(rela_vm* vm) {
 	rela_item opaque;
 	*((item_t*)&opaque) = pop(vm);
@@ -3414,6 +3699,12 @@ rela_item rela_pop(rela_vm* vm) {
 rela_item rela_pick(rela_vm* vm, int pos) {
 	rela_item opaque;
 	*((item_t*)&opaque) = *item(vm, pos);
+	return opaque;
+}
+
+rela_item rela_top(rela_vm* vm) {
+	rela_item opaque;
+	*((item_t*)&opaque) = top(vm);
 	return opaque;
 }
 
@@ -3544,6 +3835,24 @@ void* rela_to_data(rela_vm* vm, rela_item opaque) {
 	char tmp[STRTMP];
 	item_t item = *((item_t*)&opaque);
 	ensure(vm, item.type == USERDATA, "item is not userdata: %s", tmptext(vm, item, tmp, sizeof(tmp)));
-	return item.data;
+	return item.data->ptr;
+}
+
+void rela_meta_set(rela_vm* vm, rela_item data, rela_item meta) {
+	item_t ditem = *((item_t*)&data);
+	item_t mitem = *((item_t*)&meta);
+	push(vm, ditem);
+	push(vm, mitem);
+	op_meta_set(vm);
+}
+
+rela_item rela_core(rela_vm* vm) {
+	push(vm, (item_t){.type = MAP, .map = vm->scope_core});
+	return rela_pop(vm);
+}
+
+rela_item rela_global(rela_vm* vm) {
+	push(vm, (item_t){.type = MAP, .map = vm->scope_global});
+	return rela_pop(vm);
 }
 

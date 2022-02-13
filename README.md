@@ -4,7 +4,7 @@ Rela is a scripting language designed to:
 * Be easy to embed with similar usage patterns to Lua (stack-based, callbacks etc)
 * Provide separate vector[] and map{} types, with vectors indexed from 0
 * Treat all variables as implicitly local, unless explicitly declared global
-* Provide explicit coroutines and nested functions, but not closures or metatables
+* Provide explicit coroutines and nested functions, but not implicit closures
 * Use setjmp/longjmp for emulating exceptions, but not for switching coroutines
 * Use regional memory management without ref-counting, cycles or collection pauses
 * Use PCRE regex syntax

@@ -86,6 +86,7 @@ rela_item rela_make_integer(rela_vm* rela, int64_t val);
 rela_item rela_make_string(rela_vm* rela, const char* str);
 rela_item rela_make_vector(rela_vm* rela);
 rela_item rela_make_map(rela_vm* rela);
+rela_item rela_make_callback(rela_vm* rela, rela_callback cb);
 rela_item rela_make_data(rela_vm* rela, void* data);
 
 rela_item rela_pop(rela_vm* rela);
@@ -119,6 +120,11 @@ double rela_to_number(rela_vm* rela, rela_item item);
 int64_t rela_to_integer(rela_vm* rela, rela_item item);
 const char* rela_to_string(rela_vm* rela, rela_item item);
 void* rela_to_data(rela_vm* rela, rela_item item);
+
+void rela_meta_set(rela_vm* vm, rela_item data, rela_item meta);
+
+rela_item rela_core(rela_vm* vm);
+rela_item rela_global(rela_vm* vm);
 
 #ifdef __cplusplus
 }
