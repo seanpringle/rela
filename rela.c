@@ -335,6 +335,7 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node);
 static int parse_arglist(rela_vm* vm, const char *source);
 static int parse_node(rela_vm* vm, const char *source);
 static void method(rela_vm* vm, item_t item, int argc, item_t* argv, int retc, item_t* retv);
+static bool tick(rela_vm* vm);
 
 #ifdef NDEBUG
 void explode(rela_vm* vm) { longjmp(vm->jmp, 1); }
@@ -926,12 +927,25 @@ static bool equal(rela_vm* vm, item_t a, item_t b) {
 			method(vm, func, 2, argv, 1, retv);
 			return truth(vm, retv[0]);
 		}
-		if (a.type == VECTOR) return a.vec == b.vec;
+		if (a.type == VECTOR && a.vec == b.vec) return true;
+		if (a.type == VECTOR && vec_size(vm, a.vec) == vec_size(vm, b.vec)) {
+			for (int i = 0, l = vec_size(vm, a.vec); i < l; i++) {
+				if (!equal(vm, vec_get(vm, a.vec, i), vec_get(vm, b.vec, i))) return false;
+			}
+			return true;
+		}
 		if (a.type == MAP && meta_get(vm, a.map->meta, "==", &func)) {
 			method(vm, func, 2, argv, 1, retv);
 			return truth(vm, retv[0]);
 		}
-		if (a.type == MAP) return a.map == b.map;
+		if (a.type == MAP && a.map == b.map) return true;
+		if (a.type == MAP && vec_size(vm, &a.map->keys) == vec_size(vm, &b.map->keys)) {
+			for (int i = 0, l = vec_size(vm, &a.map->keys); i < l; i++) {
+				if (!equal(vm, vec_get(vm, &a.map->keys, i), vec_get(vm, &b.map->keys, i))) return false;
+				if (!equal(vm, vec_get(vm, &a.map->vals, i), vec_get(vm, &b.map->vals, i))) return false;
+			}
+			return true;
+		}
 		if (a.type == SUBROUTINE) return a.sub == b.sub;
 		if (a.type == COROUTINE) return a.cor == b.cor;
 		if (a.type == USERDATA && meta_get(vm, a.data->meta, "==", &func)) {
@@ -2581,18 +2595,18 @@ static void op_coroutine(rela_vm* vm) {
 
 static void op_resume(rela_vm* vm) {
 	ensure(vm, depth(vm) && item(vm, 0)->type == COROUTINE, "resume missing coroutine");
-
 	cor_t *cor = item(vm, 0)->cor;
 
+	int items = depth(vm);
+	cor_t* caller = vm->routine;
+
 	if (cor->state == COR_DEAD) {
+		caller->stack.depth -= items;
 		push(vm, nil(vm));
 		return;
 	}
 
 	cor->state = COR_RUNNING;
-
-	int items = depth(vm);
-	cor_t* caller = vm->routine;
 
 	vec_push(vm, &vm->routines, (item_t){.type = COROUTINE, .cor = cor});
 	vm->routine = cor;
@@ -2620,7 +2634,7 @@ static void op_yield(rela_vm* vm) {
 	}
 
 	caller->stack.depth -= items;
-	vm->routine->marks.depth += items;
+//	vm->routine->marks.depth += items;
 }
 
 static void op_global(rela_vm* vm) {
@@ -2916,6 +2930,42 @@ static void op_for(rela_vm* vm) {
 
 			assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->vals, step));
 		}
+	}
+	else
+	if (iter.type == SUBROUTINE || iter.type == CALLBACK) {
+		item_t argv[1] = {integer(vm, step)};
+		item_t retv[2] = {nil(vm), nil(vm)};
+		method(vm, iter, 1, argv, 2, retv);
+
+		if (retv[0].type == NIL) {
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+		}
+		else {
+			int idx = 0;
+			if (vec_size(vm, vars) > 1)
+				assign(vm, vec_get(vm, vars, var++), retv[idx++]);
+			assign(vm, vec_get(vm, vars, var++), retv[idx++]);
+		}
+	}
+	else
+	if (iter.type == COROUTINE) {
+		op_mark(vm);
+		push(vm, iter);
+		push(vm, integer(vm, step));
+		op_resume(vm);
+		while (vm->routine == iter.cor && tick(vm));
+
+		if (!depth(vm) || item(vm, 0)->type == NIL) {
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+		}
+		else {
+			int idx = 0;
+			if (vec_size(vm, vars) > 1)
+				assign(vm, vec_get(vm, vars, var++), depth(vm) > idx ? *item(vm, idx++): nil(vm));
+			assign(vm, vec_get(vm, vars, var++), depth(vm) > idx ? *item(vm, idx++): nil(vm));
+		}
+
+		limit(vm, 0);
 	}
 	else {
 		vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-1];
