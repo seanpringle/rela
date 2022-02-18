@@ -262,80 +262,6 @@ typedef struct {
 	int next;
 } pool_t;
 
-static int pool_index(pool_t* pool, void* ptr) {
-	for (int page = 0; page < pool->depth/pool->page; page++) {
-		if (pool->pages[page] <= ptr && ptr < pool->pages[page] + pool->object*pool->page) {
-			return page*pool->page + (ptr - pool->pages[page])/pool->object;
-		}
-	}
-	return -1;
-}
-
-static void* pool_ptr(pool_t* pool, int index) {
-	assert(index < pool->depth);
-	int page = index/pool->page;
-	int cell = index%pool->page;
-	return pool->pages[page] + (cell * pool->object);
-}
-
-static void* pool_allot_index(pool_t* pool, int index) {
-	assert(index < pool->depth);
-	pool->used[index] = true;
-
-	void* ptr = pool_ptr(pool, index);
-	memset(ptr, 0, pool->object);
-
-	pool->next = index+1;
-	pool->extant++;
-
-	return ptr;
-}
-
-static void* pool_alloc(pool_t* pool) {
-	for (int i = pool->next; i < pool->depth; i++) {
-		if (!pool->used[i]) return pool_allot_index(pool, i);
-	}
-	for (int i = 0; i < pool->next; i++) {
-		if (!pool->used[i]) return pool_allot_index(pool, i);
-	}
-
-	int index = pool->depth;
-	int pages = pool->depth/pool->page + 1;
-
-	pool->depth += pool->page;
-
-	pool->used = realloc(pool->used, sizeof(bool) * pool->depth);
-	memset(pool->used + sizeof(bool)*index, 0, sizeof(bool)*pool->page);
-
-	pool->mark = realloc(pool->mark, sizeof(bool) * pool->depth);
-	memset(pool->mark + sizeof(bool)*index, 0, sizeof(bool)*pool->page);
-
-	pool->pages = realloc(pool->pages, pages * sizeof(void*));
-	pool->pages[pages-1] = malloc(pool->object * pool->page);
-
-	return pool_allot_index(pool, index);
-}
-
-static void pool_free(pool_t* pool, void* ptr) {
-	int index = pool_index(pool, ptr);
-	if (index >= 0) {
-		memset(ptr, 0, pool->object);
-		pool->used[index] = false;
-		pool->extant--;
-	}
-	assert(pool->extant >= 0);
-}
-
-static void pool_clear(pool_t* pool) {
-	for (int i = 0, l = pool->depth/pool->page; i < l; i++) {
-		free(pool->pages[i]);
-	}
-	free(pool->pages);
-	free(pool->used);
-	free(pool->mark);
-	memset(pool, 0, sizeof(pool_t));
-}
-
 typedef struct {
 	char** cells;
 	bool* mark;
@@ -418,6 +344,82 @@ void explode(rela_vm* vm) { raise(SIGUSR1); }
 
 #define ensure(vm,c,...) if (!(c)) { snprintf(vm->err, sizeof(vm->err), __VA_ARGS__); explode(vm); }
 
+static int pool_index(rela_vm* vm, pool_t* pool, void* ptr) {
+	for (int page = 0; page < pool->depth/pool->page; page++) {
+		if (pool->pages[page] <= ptr && ptr < pool->pages[page] + pool->object*pool->page) {
+			return page*pool->page + (ptr - pool->pages[page])/pool->object;
+		}
+	}
+	return -1;
+}
+
+static void* pool_ptr(rela_vm* vm, pool_t* pool, int index) {
+	assert(index < pool->depth);
+	int page = index/pool->page;
+	int cell = index%pool->page;
+	return pool->pages[page] + (cell * pool->object);
+}
+
+static void* pool_allot_index(rela_vm* vm, pool_t* pool, int index) {
+	assert(index < pool->depth);
+	pool->used[index] = true;
+
+	void* ptr = pool_ptr(vm, pool, index);
+	memset(ptr, 0, pool->object);
+
+	pool->next = index+1;
+	pool->extant++;
+
+	return ptr;
+}
+
+static void* pool_alloc(rela_vm* vm, pool_t* pool) {
+	for (int i = pool->next; i < pool->depth; i++) {
+		if (!pool->used[i]) return pool_allot_index(vm, pool, i);
+	}
+	for (int i = 0; i < pool->next; i++) {
+		if (!pool->used[i]) return pool_allot_index(vm, pool, i);
+	}
+
+	int index = pool->depth;
+	int pages = pool->depth/pool->page + 1;
+
+	pool->depth += pool->page;
+
+	pool->used = realloc(pool->used, sizeof(bool) * pool->depth);
+	pool->mark = realloc(pool->mark, sizeof(bool) * pool->depth);
+	pool->pages = realloc(pool->pages, pages * sizeof(void*));
+	ensure(vm, pool->used && pool->mark && pool->pages, "oom");
+
+	memset(pool->used + sizeof(bool)*index, 0, sizeof(bool)*pool->page);
+	memset(pool->mark + sizeof(bool)*index, 0, sizeof(bool)*pool->page);
+
+	pool->pages[pages-1] = malloc(pool->object * pool->page);
+	ensure(vm, pool->pages[pages-1], "oom");
+
+	return pool_allot_index(vm, pool, index);
+}
+
+static void pool_free(rela_vm* vm, pool_t* pool, void* ptr) {
+	int index = pool_index(vm, pool, ptr);
+	if (index >= 0) {
+		memset(ptr, 0, pool->object);
+		pool->used[index] = false;
+		pool->extant--;
+	}
+	assert(pool->extant >= 0);
+}
+
+static void pool_clear(rela_vm* vm, pool_t* pool) {
+	for (int i = 0, l = pool->depth/pool->page; i < l; i++) {
+		free(pool->pages[i]);
+	}
+	free(pool->pages);
+	free(pool->used);
+	free(pool->mark);
+	memset(pool, 0, sizeof(pool_t));
+}
+
 #define RESULTS_DISCARD 0
 #define RESULTS_FIRST 1
 #define RESULTS_ALL -1
@@ -461,7 +463,7 @@ static void gc_mark_str(rela_vm* vm, const char* str) {
 static void gc_mark_vec(rela_vm* vm, vec_t* vec) {
 	if (!vec) return;
 	gc_mark_item(vm, vec->meta);
-	int index = pool_index(&vm->vecs, vec);
+	int index = pool_index(vm, &vm->vecs, vec);
 	if (index >= 0) {
 		if (vm->vecs.mark[index]) return;
 		vm->vecs.mark[index] = true;
@@ -474,7 +476,7 @@ static void gc_mark_vec(rela_vm* vm, vec_t* vec) {
 static void gc_mark_map(rela_vm* vm, map_t* map) {
 	if (!map) return;
 	gc_mark_item(vm, map->meta);
-	int index = pool_index(&vm->maps, map);
+	int index = pool_index(vm, &vm->maps, map);
 	if (index >= 0) {
 		if (vm->maps.mark[index]) return;
 		vm->maps.mark[index] = true;
@@ -486,7 +488,7 @@ static void gc_mark_map(rela_vm* vm, map_t* map) {
 static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 	if (!cor) return;
 
-	int index = pool_index(&vm->cors, cor);
+	int index = pool_index(vm, &vm->cors, cor);
 	if (index >= 0) {
 		if (vm->cors.mark[index]) return;
 		vm->cors.mark[index] = true;
@@ -510,7 +512,7 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 
 static void gc_mark_data(rela_vm* vm, data_t* data) {
 	if (!data) return;
-	int index = pool_index(&vm->data, data);
+	int index = pool_index(vm, &vm->data, data);
 	if (index >= 0) {
 		if (vm->data.mark[index]) return;
 		vm->data.mark[index] = true;
@@ -525,7 +527,9 @@ static void gc(rela_vm* vm) {
 	memset(vm->vecs.mark, 0, sizeof(bool)*vm->vecs.depth);
 	memset(vm->cors.mark, 0, sizeof(bool)*vm->cors.depth);
 	memset(vm->data.mark, 0, sizeof(bool)*vm->data.depth);
+
 	vm->stringsA.mark = calloc(sizeof(bool),vm->stringsA.depth);
+	ensure(vm, vm->stringsA.mark, "oom");
 
 	gc_mark_map(vm, vm->scope_core);
 	gc_mark_map(vm, vm->scope_global);
@@ -542,34 +546,34 @@ static void gc(rela_vm* vm) {
 
 	for (int i = 0, l = vm->vecs.depth; i < l; i++) {
 		if (vm->vecs.used[i] && !vm->vecs.mark[i]) {
-			vec_t* vec = pool_ptr(&vm->vecs, i);
+			vec_t* vec = pool_ptr(vm, &vm->vecs, i);
 			free(vec->items);
-			pool_free(&vm->vecs, vec);
+			pool_free(vm, &vm->vecs, vec);
 		}
 	}
 
 	for (int i = 0, l = vm->maps.depth; i < l; i++) {
 		if (vm->maps.used[i] && !vm->maps.mark[i]) {
-			map_t* map = pool_ptr(&vm->maps, i);
+			map_t* map = pool_ptr(vm, &vm->maps, i);
 			free(map->keys.items);
 			free(map->vals.items);
-			pool_free(&vm->maps, map);
+			pool_free(vm, &vm->maps, map);
 		}
 	}
 
 	for (int i = 0, l = vm->data.depth; i < l; i++) {
 		if (vm->data.used[i] && !vm->data.mark[i]) {
-			data_t* data = pool_ptr(&vm->data, i);
-			pool_free(&vm->data, data);
+			data_t* data = pool_ptr(vm, &vm->data, i);
+			pool_free(vm, &vm->data, data);
 		}
 	}
 
 	for (int i = 0, l = vm->cors.depth; i < l; i++) {
 		if (vm->cors.used[i] && !vm->cors.mark[i]) {
-			cor_t* cor = pool_ptr(&vm->cors, i);
+			cor_t* cor = pool_ptr(vm, &vm->cors, i);
 			for (int i = 0; i < cor->stack.width; i++) free(cor->stack.pages[i]);
 			free(cor->stack.pages);
-			pool_free(&vm->cors, cor);
+			pool_free(vm, &vm->cors, cor);
 		}
 	}
 
@@ -587,19 +591,19 @@ static void gc(rela_vm* vm) {
 }
 
 static vec_t* vec_allot(rela_vm* vm) {
-	return pool_alloc(&vm->vecs);
+	return pool_alloc(vm, &vm->vecs);
 }
 
 static map_t* map_allot(rela_vm* vm) {
-	return pool_alloc(&vm->maps);
+	return pool_alloc(vm, &vm->maps);
 }
 
 static data_t* data_allot(rela_vm* vm) {
-	return pool_alloc(&vm->data);
+	return pool_alloc(vm, &vm->data);
 }
 
 static cor_t* cor_allot(rela_vm* vm) {
-	return pool_alloc(&vm->cors);
+	return pool_alloc(vm, &vm->cors);
 }
 
 static size_t vec_size(rela_vm* vm, vec_t* vec) {
@@ -613,6 +617,7 @@ static item_t* vec_ins(rela_vm* vm, vec_t* vec, int index) {
 	if (!vec->items || vec->count == vec->buffer) {
 		vec->buffer = vec->buffer ? vec->buffer*2: 8;
 		vec->items = realloc(vec->items, sizeof(item_t) * vec->buffer);
+		ensure(vm, vec->items, "oom");
 	}
 
 	if (index < vec->count)
@@ -796,9 +801,11 @@ static const char* strintern(rela_vm* vm, const char* str) {
 
 	int len = strlen(str);
 	char* cpy = calloc(len+1,1);
+	ensure(vm, cpy, "oom");
 	memmove(cpy, str, len);
 
 	vm->stringsA.cells = realloc(vm->stringsA.cells, ++vm->stringsA.depth * sizeof(char*));
+	ensure(vm, vm->stringsA.cells, "oom");
 
 	if (index < vm->stringsA.depth-1) {
 		memmove(&vm->stringsA.cells[index+1], &vm->stringsA.cells[index], (vm->stringsA.depth - index - 1) * sizeof(char*));
@@ -1128,6 +1135,7 @@ static code_t* compiled(rela_vm* vm, int offset) {
 
 static int compile(rela_vm* vm, int op, item_t item) {
 	vm->code.cells = realloc(vm->code.cells, sizeof(code_t)*(vm->code.depth+10));
+	ensure(vm, vm->code.cells, "oom");
 
 	// peephole
 	if (vm->code.depth > 0) {
@@ -1255,7 +1263,9 @@ static void push(rela_vm* vm, item_t item) {
 		vm->routine->stack.width++;
 		vm->routine->stack.limit += STACK;
 		vm->routine->stack.pages = realloc(vm->routine->stack.pages, vm->routine->stack.width*sizeof(item_t*));
+		ensure(vm, vm->routine->stack.pages, "oom");
 		vm->routine->stack.pages[vm->routine->stack.width-1] = malloc(sizeof(item_t)*STACK);
+		ensure(vm, vm->routine->stack.pages[vm->routine->stack.width-1], "oom");
 	}
 	int index = vm->routine->stack.depth++;
 	*stack_ref(vm, vm->routine, index) = item;
@@ -1327,14 +1337,16 @@ static int skip_gap(const char *source) {
 	return offset;
 }
 
-static int peek(const char *source, char *name) {
-	int len = strlen(name);
-	return !strncmp(source, name, len) && !isname(source[len]);
+static bool peek(const char* source, const char* name) {
+	while (*source && *name && *source == *name) { ++source; ++name; }
+	return *source && !*name && !isname(*source);
 }
 
 static node_t* node_allot(rela_vm* vm) {
 	vm->nodes.cells = realloc(vm->nodes.cells, (vm->nodes.depth+1)*sizeof(node_t*));
+	ensure(vm, vm->nodes.cells, "oom");
 	vm->nodes.cells[vm->nodes.depth] = calloc(sizeof(node_t),1);
+	ensure(vm, vm->nodes.cells[vm->nodes.depth], "oom");
 	return vm->nodes.cells[vm->nodes.depth++];
 }
 
@@ -3411,10 +3423,10 @@ static void destroy(rela_vm* vm) {
 	free(vm->stringsA.cells);
 	free(vm->stringsB.cells);
 
-	pool_clear(&vm->maps);
-	pool_clear(&vm->vecs);
-	pool_clear(&vm->cors);
-	pool_clear(&vm->data);
+	pool_clear(vm, &vm->maps);
+	pool_clear(vm, &vm->vecs);
+	pool_clear(vm, &vm->cors);
+	pool_clear(vm, &vm->data);
 
 	free(vm);
 }
@@ -3428,7 +3440,7 @@ rela_vm* rela_create(const char* src, size_t registrations, const rela_register*
 
 rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t registrations, const rela_register* registry, void* custom) {
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
-	if (!vm) exit(1);
+	if (!vm) return NULL;
 
 	vm->vecs.page = 1024;
 	vm->vecs.object = sizeof(vec_t);
@@ -3597,6 +3609,7 @@ static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, i
 
 int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	vm->cache.cfunc = calloc(vm->cache.cfuncs, sizeof(item_t));
+	ensure(vm, vm->cache.cfunc, "oom");
 
 	int wtf = setjmp(vm->jmp);
 	if (wtf) {
