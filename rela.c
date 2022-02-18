@@ -1693,13 +1693,11 @@ static int parse_node(rela_vm* vm, const char *source) {
 		node->type = NODE_VEC;
 		node->single = true;
 		while (source[offset] && source[offset] != ']') {
-			if ((length = skip_gap(&source[offset])) > 0)
-			{
+			if ((length = skip_gap(&source[offset])) > 0) {
 				offset += length;
 				continue;
 			}
-			if (source[offset] == ',')
-			{
+			if (source[offset] == ',') {
 				offset++;
 				continue;
 			}
@@ -1716,13 +1714,11 @@ static int parse_node(rela_vm* vm, const char *source) {
 		node->single = true;
 
 		while (source[offset] && source[offset] != '}') {
-			if ((length = skip_gap(&source[offset])) > 0)
-			{
+			if ((length = skip_gap(&source[offset])) > 0) {
 				offset += length;
 				continue;
 			}
-			if (source[offset] == ',')
-			{
+			if (source[offset] == ',') {
 				offset++;
 				continue;
 			}
@@ -3526,19 +3522,30 @@ int rela_run(rela_vm* vm) {
 	return rela_run_ex(vm, 1, (int[]){0});
 }
 
+#ifdef TRACE
+// tick() tracing tmptext() may call meta-methods
+// with tick() recursion. only output the trace at
+// the top level.
+bool tracing;
+#endif
+
 static bool tick(rela_vm* vm) {
 	int ip = vm->routine->ip++;
 	assert(ip >= 0 && ip < vm->code.depth);
 	int opcode = vm->code.cells[ip].op;
 
 	#ifdef TRACE
-		code_t* c = &vm->code.cells[ip];
-		char tmpA[STRTMP];
-		const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
-		for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
-			fprintf(stderr, "  ");
-		fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
-		fflush(stderr);
+		if (!tracing) {
+			tracing = true;
+			code_t* c = &vm->code.cells[ip];
+			char tmpA[STRTMP];
+			const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
+			for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
+				fprintf(stderr, "  ");
+			fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
+			fflush(stderr);
+			tracing = false;
+		}
 	#endif
 
 	switch (opcode) {
@@ -3563,18 +3570,22 @@ static bool tick(rela_vm* vm) {
 	}
 
 	#ifdef TRACE
-		fprintf(stderr, "[");
-		for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
-			if (i == l-depth(vm))
-				fprintf(stderr, "|");
-			char tmpB[STRTMP];
-			fprintf(stderr, "%s%s",
-				tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
-				(i < l-1 ? ", ":"")
-			);
+		if (!tracing) {
+			tracing = true;
+			fprintf(stderr, "[");
+			for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
+				if (i == l-depth(vm))
+					fprintf(stderr, "|");
+				char tmpB[STRTMP];
+				fprintf(stderr, "%s%s",
+					tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
+					(i < l-1 ? ", ":"")
+				);
+			}
+			fprintf(stderr, "]\n");
+			fflush(stderr);
+			tracing = false;
 		}
-		fprintf(stderr, "]\n");
-		fflush(stderr);
 	#endif
 
 	return true;
