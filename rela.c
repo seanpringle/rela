@@ -45,7 +45,8 @@
 enum opcode_t {
 	// <order-important>
 	OP_STOP=0, OP_JMP, OP_FOR, OP_PID, OP_LIT, OP_MARK, OP_LIMIT, OP_CLEAN, OP_RETURN,
-	OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT, OPP_GNAME, OPP_COPIES,
+	OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT, OPP_GNAME,
+	OPP_COPIES, OPP_UPDATE,
 	// </order-important>
 	OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_GLOBAL, OP_MAP, OP_VECTOR,
 	OP_META_SET, OP_META_GET, OP_UNMAP, OP_LOOP, OP_UNLOOP, OP_BREAK, OP_CONTINUE, OP_JFALSE,
@@ -1153,72 +1154,85 @@ static int compile(rela_vm* vm, int op, item_t item) {
 
 	// peephole
 	if (vm->code.depth > 0) {
-		code_t* last = compiled(vm, -1);
+		code_t* back1 = compiled(vm, -1);
+		code_t* back2 = vm->code.depth > 1 ? compiled(vm, -2): NULL;
+		code_t* back3 = vm->code.depth > 2 ? compiled(vm, -3): NULL;
 
 		// remove implicit return block dead code
-		if (op == OP_CLEAN && last->op == OP_CLEAN) {
+		if (op == OP_CLEAN && back1->op == OP_CLEAN) {
 			return vm->code.depth-1;
 		}
-		if (op == OP_CLEAN && last->op == OP_RETURN) {
+		if (op == OP_CLEAN && back1->op == OP_RETURN) {
 			return vm->code.depth-1;
 		}
-		if (op == OP_RETURN && last->op == OP_RETURN) {
+		if (op == OP_RETURN && back1->op == OP_RETURN) {
 			return vm->code.depth-1;
 		}
 
 		// lit,find -> fname (duplicate vars, single lookup array[#array])
-		if (op == OP_FIND && last->op == OP_LIT) {
+		if (op == OP_FIND && back1->op == OP_LIT) {
 			for(;;) {
 				// fname,copies=n (n+1 stack items: one original + n copies)
-				if (vm->code.depth > 2) {
-					code_t* prior1 = compiled(vm, -2);
-					code_t* prior2 = compiled(vm, -3);
-					if (prior1->op == OPP_COPIES && prior2->op == OPP_FNAME && equal(vm, last->item, prior2->item)) {
-						prior1->item.inum++;
-						vm->code.depth--;
-						break;
-					}
+				if (back2 && back3 && back2->op == OPP_COPIES && back3->op == OPP_FNAME && equal(vm, back1->item, back3->item)) {
+					back2->item.inum++;
+					vm->code.depth--;
+					break;
 				}
 				// fname,copies=1 (two stack items: one original + one copy)
-				if (vm->code.depth > 1) {
-					code_t* prior = compiled(vm, -2);
-					if (prior->op == OPP_FNAME && equal(vm, last->item, prior->item)) {
-						last->op = OPP_COPIES;
-						last->item = integer(vm, 1);
-						break;
-					}
+				if (back2 && back2->op == OPP_FNAME && equal(vm, back1->item, back2->item)) {
+					back1->op = OPP_COPIES;
+					back1->item = integer(vm, 1);
+					break;
 				}
-				last->op = OPP_FNAME;
+				back1->op = OPP_FNAME;
 				break;
 			}
 			return vm->code.depth-1;
 		}
 
 		// lit,get -> gname
-		if (op == OP_GET && last->op == OP_LIT) {
-			last->op = OPP_GNAME;
+		if (op == OP_GET && back1->op == OP_LIT) {
+			back1->op = OPP_GNAME;
 			return vm->code.depth-1;
 		}
 
 		// fname,call -> cfunc
-		if (op == OP_CALL && last->op == OPP_FNAME) {
-			last->op = OPP_CFUNC;
+		if (op == OP_CALL && back1->op == OPP_FNAME) {
+			back1->op = OPP_CFUNC;
 			return vm->code.depth-1;
 		}
 
+		// fname[a],op,lit[a],assign0 -> update[a],op (var=var+n, var=var*n)
+		if (op == OP_ASSIGN && item.type == INTEGER && item.inum == 0 && back1->op == OP_LIT && back2 && back3) {
+			bool sameName = back3->op == OPP_FNAME && equal(vm, back1->item, back3->item);
+			bool simpleOp = back2->op == OPP_ADD_LIT || back2->op == OPP_MUL_LIT;
+			if (sameName && simpleOp) {
+				vm->code.cells[vm->code.depth-3] = (code_t){.op = OPP_UPDATE, .item = back1->item};
+				vm->code.depth--;
+				return vm->code.depth-1;
+			}
+		}
+
+		// mark,update,op,limit -> update,op
+		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && back2 && back3) {
+			if (back3->op == OP_MARK && back2->op == OPP_UPDATE) {
+				vm->code.cells[vm->code.depth-3] = *back2;
+				vm->code.cells[vm->code.depth-2] = *back1;
+				vm->code.depth--;
+				return vm->code.depth-1;
+			}
+		}
+
 		// lit,assign0 -> assignl
-		if (op == OP_ASSIGN && item.type == INTEGER && item.inum == 0 && last->op == OP_LIT) {
-			last->op = OPP_ASSIGNL;
+		if (op == OP_ASSIGN && item.type == INTEGER && item.inum == 0 && back1->op == OP_LIT) {
+			back1->op = OPP_ASSIGNL;
 			return vm->code.depth-1;
 		}
 
 		// mark,lit,assignl,limit0 -> lit,assignp (map { litkey = litval }, var = lit)
-		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && vm->code.depth > 3) {
-			bool mark = vm->code.cells[vm->code.depth-3].op == OP_MARK;
-			bool lit1 = vm->code.cells[vm->code.depth-2].op == OP_LIT;
-			bool assignl = last->op == OPP_ASSIGNL;
-			if (mark && lit1 && assignl) {
-				item_t key = last->item;
+		if (op == OP_LIMIT && item.type == INTEGER && item.inum == 0 && back2 && back3) {
+			if (back3->op == OP_MARK && back2->op == OP_LIT && back1->op == OPP_ASSIGNL) {
+				item_t key = back1->item;
 				vm->code.cells[vm->code.depth-3] = vm->code.cells[vm->code.depth-2];
 				vm->code.cells[vm->code.depth-2] = (code_t){.op = OPP_ASSIGNP, .item = key};
 				vm->code.depth--;
@@ -1227,37 +1241,32 @@ static int compile(rela_vm* vm, int op, item_t item) {
 		}
 
 		// lit,neg
-		if (op == OP_NEG && last->op == OP_LIT && last->item.type == INTEGER) {
-			last->item.inum = -last->item.inum;
+		if (op == OP_NEG && back1->op == OP_LIT && back1->item.type == INTEGER) {
+			back1->item.inum = -back1->item.inum;
 			return vm->code.depth-1;
 		}
 
 		// lit,neg
-		if (op == OP_NEG && last->op == OP_LIT && last->item.type == FLOAT) {
-			last->item.fnum = -last->item.fnum;
+		if (op == OP_NEG && back1->op == OP_LIT && back1->item.type == FLOAT) {
+			back1->item.fnum = -back1->item.fnum;
 			return vm->code.depth-1;
 		}
 
 		// lit,add
-		if (op == OP_ADD && last->op == OP_LIT) {
-			last->op = OPP_ADD_LIT;
+		if (op == OP_ADD && back1->op == OP_LIT) {
+			back1->op = OPP_ADD_LIT;
 			return vm->code.depth-1;
 		}
 
 		// lit,mul
-		if (op == OP_MUL && last->op == OP_LIT) {
-			last->op = OPP_MUL_LIT;
+		if (op == OP_MUL && back1->op == OP_LIT) {
+			back1->op = OPP_MUL_LIT;
 			return vm->code.depth-1;
 		}
 	}
 
 	vm->code.cells[vm->code.depth++] = (code_t){.op = op, .item = item};
 	return vm->code.depth-1;
-}
-
-static int depth(rela_vm* vm) {
-	int base = vm->routine->marks.depth ? vm->routine->marks.cells[vm->routine->marks.depth-1]: 0;
-	return vm->routine->stack.depth - base;
 }
 
 static item_t* stack_ref(rela_vm* vm, cor_t* routine, int index) {
@@ -1269,6 +1278,17 @@ static item_t* stack_ref(rela_vm* vm, cor_t* routine, int index) {
 static item_t* stack_cell(rela_vm* vm, int index) {
 	if (index < 0) index = vm->routine->stack.depth + index;
 	assert(index >= 0 && index < vm->routine->stack.depth);
+	return stack_ref(vm, vm->routine, index);
+}
+
+static int depth(rela_vm* vm) {
+	int base = vm->routine->marks.depth ? vm->routine->marks.cells[vm->routine->marks.depth-1]: 0;
+	return vm->routine->stack.depth - base;
+}
+
+static item_t* item(rela_vm* vm, int i) {
+	int base = vm->routine->marks.cells[vm->routine->marks.depth-1];
+	int index = i >= 0 ? base+i: i;
 	return stack_ref(vm, vm->routine, index);
 }
 
@@ -1286,31 +1306,25 @@ static void push(rela_vm* vm, item_t item) {
 }
 
 static item_t pop(rela_vm* vm) {
-	ensure(vm, vm->routine->stack.depth > 0, "stack underflow");
+	assert(vm->routine->stack.depth > 0);
 	int index = --vm->routine->stack.depth;
 	return *stack_ref(vm, vm->routine, index);
 }
 
 static item_t top(rela_vm* vm) {
-	ensure(vm, vm->routine->stack.depth > 0, "stack underflow");
+	assert(vm->routine->stack.depth > 0);
 	int index = vm->routine->stack.depth-1;
 	return *stack_ref(vm, vm->routine, index);
 }
 
 static void opush(rela_vm* vm, item_t item) {
-	ensure(vm, vm->routine->other.depth < STACK, "other overflow");
+	assert(vm->routine->other.depth < STACK);
 	vm->routine->other.cells[vm->routine->other.depth++] = item;
 }
 
 static item_t opop(rela_vm* vm) {
-	ensure(vm, vm->routine->other.depth > 0, "other underflow");
+	assert(vm->routine->other.depth > 0);
 	return vm->routine->other.cells[--vm->routine->other.depth];
-}
-
-static item_t* item(rela_vm* vm, int i) {
-	int base = vm->routine->marks.cells[vm->routine->marks.depth-1];
-	int index = i >= 0 ? base+i: i;
-	return stack_ref(vm, vm->routine, index);
 }
 
 static item_t pop_type(rela_vm* vm, int type) {
@@ -1560,24 +1574,27 @@ static int parse_node(rela_vm* vm, const char *source) {
 				node->type = NODE_FOR;
 				node->control = true;
 
-				// key[,val] local variable names
+				// [key[,val]] local variable names
 				offset += skip_gap(&source[offset]);
-				ensure(vm, isnamefirst(source[offset]), "expected variable: %s", &source[offset]);
+				if (!peek(&source[offset], "in")) {
+					ensure(vm, isnamefirst(source[offset]), "expected for [<key>,]val in iterable: %s", &source[offset]);
 
-				length = str_skip(&source[offset], isname);
-				vec_push_allot(vm, &node->keys, string(vm, substr(vm, &source[offset], 0, length)));
-				offset += length;
-
-				offset += skip_gap(&source[offset]);
-				if (source[offset] == ',') {
-					offset++;
 					length = str_skip(&source[offset], isname);
 					vec_push_allot(vm, &node->keys, string(vm, substr(vm, &source[offset], 0, length)));
 					offset += length;
+
+					offset += skip_gap(&source[offset]);
+					if (source[offset] == ',') {
+						offset++;
+						length = str_skip(&source[offset], isname);
+						vec_push_allot(vm, &node->keys, string(vm, substr(vm, &source[offset], 0, length)));
+						offset += length;
+					}
 				}
 
 				offset += skip_gap(&source[offset]);
-				if (peek(&source[offset], "in")) offset += 2;
+				ensure(vm, peek(&source[offset], "in"), "expected for [<key>,]val in iterable: %s", &source[offset]);
+				offset += 2;
 
 				// iterable
 				offset += parse(vm, &source[offset], RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR);
@@ -2528,8 +2545,10 @@ static void limit(rela_vm* vm, int count) {
 	int old_depth = vm->routine->marks.cells[--vm->routine->marks.depth];
 	if (count >= 0) {
 		int req_depth = old_depth + count;
-		if (req_depth < vm->routine->stack.depth) vm->routine->stack.depth = req_depth;
-		else while (req_depth > vm->routine->stack.depth) push(vm, nil(vm));
+		if (req_depth < vm->routine->stack.depth) {
+			vm->routine->stack.depth = req_depth;
+		} else
+		while (req_depth > vm->routine->stack.depth) push(vm, nil(vm));
 	}
 }
 
@@ -2634,6 +2653,7 @@ static void op_yield(rela_vm* vm) {
 	}
 
 	caller->stack.depth -= items;
+
 //	vm->routine->marks.depth += items;
 }
 
@@ -2761,7 +2781,6 @@ static void op_vector(rela_vm* vm) {
 	}
 
 	vm->routine->stack.depth -= items;
-
 	push(vm, (item_t){.type = VECTOR, .vec = vec});
 }
 
@@ -2792,9 +2811,7 @@ static item_t* local(rela_vm* vm, const char* key) {
 	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
 
 	for (int i = 0, l = frame->locals.depth; i < l; i++) {
-		if (frame->locals.keys[i] == key) {
-			return &frame->locals.vals[i];
-		}
+		if (frame->locals.keys[i] == key) return &frame->locals.vals[i];
 	}
 	return NULL;
 }
@@ -2838,7 +2855,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	cor_t* cor = vm->routine;
 
 	// OP_ASSIGN is used for too many things: local variables, map literal keys, global keys
-	map_t* map = vm->routine->map.type == MAP ? vm->routine->map.map: NULL;
+	map_t* map = cor->map.type == MAP ? cor->map.map: NULL;
 
 	if (!map && cor->frames.depth) {
 		assert(key.type == STRING);
@@ -2891,7 +2908,6 @@ static void op_for(rela_vm* vm) {
 
 	int var = 0;
 	vec_t* vars = literal(vm).vec;
-	assert(vec_size(vm, vars) >= 1);
 
 	item_t iter = top(vm);
 	int step = vm->routine->loops.cells[vm->routine->loops.depth-1];
@@ -2904,7 +2920,8 @@ static void op_for(rela_vm* vm) {
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 
-			assign(vm, vec_get(vm, vars, var++), integer(vm,step));
+			if (vec_size(vm, vars) > 0)
+				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 		}
 	}
 	else
@@ -2916,7 +2933,8 @@ static void op_for(rela_vm* vm) {
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 
-			assign(vm, vec_get(vm, vars, var++), vec_get(vm, iter.vec, step));
+			if (vec_size(vm, vars) > 0)
+				assign(vm, vec_get(vm, vars, var++), vec_get(vm, iter.vec, step));
 		}
 	}
 	else
@@ -2928,7 +2946,8 @@ static void op_for(rela_vm* vm) {
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->keys, step));
 
-			assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->vals, step));
+			if (vec_size(vm, vars) > 0)
+				assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->vals, step));
 		}
 	}
 	else
@@ -2944,7 +2963,8 @@ static void op_for(rela_vm* vm) {
 			int idx = 0;
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), retv[idx++]);
-			assign(vm, vec_get(vm, vars, var++), retv[idx++]);
+			if (vec_size(vm, vars) > 0)
+				assign(vm, vec_get(vm, vars, var++), retv[idx++]);
 		}
 	}
 	else
@@ -2962,7 +2982,8 @@ static void op_for(rela_vm* vm) {
 			int idx = 0;
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), depth(vm) > idx ? *item(vm, idx++): nil(vm));
-			assign(vm, vec_get(vm, vars, var++), depth(vm) > idx ? *item(vm, idx++): nil(vm));
+			if (vec_size(vm, vars) > 0)
+				assign(vm, vec_get(vm, vars, var++), depth(vm) > idx ? *item(vm, idx++): nil(vm));
 		}
 
 		limit(vm, 0);
@@ -3289,13 +3310,10 @@ static void op_fname(rela_vm* vm) {
 	item_t key = literal(vm);
 	item_t* val = find(vm, key);
 
-	if (val) {
-		push(vm, *val);
-		return;
-	}
-
 	char tmp[STRTMP];
-	ensure(vm, false, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+	ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+
+	push(vm, *val);
 }
 
 static void op_gname(rela_vm* vm) {
@@ -3312,33 +3330,38 @@ static void op_cfunc(rela_vm* vm) {
 	}
 	item_t key = literal(vm);
 	item_t* val = find(vm, key);
-	if (val) {
-		*cache = *val;
-		call(vm, *cache);
-		return;
-	}
+
 	char tmp[STRTMP];
-	ensure(vm, false, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+	ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
+
+	*cache = *val;
+	call(vm, *cache);
 }
 
 // compression of mark,lit,lit,assign,limit0
 static void op_assignp(rela_vm* vm) {
-	item_t key = literal(vm);
-	item_t val = pop(vm);
-	assign(vm, key, val);
+	assign(vm, literal(vm), pop(vm));
 }
 
 // lit,assign0
 static void op_assignl(rela_vm* vm) {
-	item_t key = literal(vm);
 	// indexed from the base of the current subframe
-	item_t val = depth(vm) ? *item(vm, 0): nil(vm);
-	assign(vm, key, val);
+	assign(vm, literal(vm), depth(vm) ? *item(vm, 0): nil(vm));
 }
 
 // dups
 static void op_copies(rela_vm* vm) {
 	for (int i = 0, l = literal_int(vm); i < l; i++) push(vm, top(vm));
+}
+
+// apply op direct to variable
+static void op_update(rela_vm* vm) {
+	item_t* val = find(vm, literal(vm));
+
+	char tmp[STRTMP];
+	ensure(vm, val, "unknown name: %s", tmptext(vm, literal(vm), tmp, sizeof(tmp)));
+
+	push(vm, *val); tick(vm); *val = pop(vm);
 }
 
 typedef struct {
@@ -3437,9 +3460,10 @@ func_t funcs[OPERATIONS] = {
 	[OPP_CFUNC]    = { .name = "cfunc",     .lib = false, .func = op_cfunc     },
 	[OPP_ASSIGNP]  = { .name = "assignp",   .lib = false, .func = op_assignp   },
 	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl   },
-	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies    },
 	[OPP_MUL_LIT]  = { .name = "litmul",    .lib = false, .func = op_mul_lit   },
 	[OPP_ADD_LIT]  = { .name = "litadd",    .lib = false, .func = op_add_lit   },
+	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies    },
+	[OPP_UPDATE]   = { .name = "update",    .lib = false, .func = op_update    },
 };
 
 static void decompile(rela_vm* vm, code_t* c) {
