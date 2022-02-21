@@ -125,7 +125,7 @@ typedef struct _map_t {
 typedef struct _data_t {
 	item_t meta;
 	void* ptr;
-} data_t; // vector
+} data_t; // userdata
 
 // powers of 2
 #define STACK 32u
@@ -668,7 +668,6 @@ static item_t vec_get(rela_vm* vm, vec_t* vec, int index) {
 
 static int vec_lower_bound(rela_vm* vm, vec_t* vec, item_t key) {
 	int size = vec->count;
-
 	if (!size) return 0;
 
 	if (size < 16) {
@@ -731,12 +730,10 @@ static item_t* map_ref(rela_vm* vm, map_t* map, item_t key) {
 
 static bool map_get(rela_vm* vm, map_t* map, item_t key, item_t* val) {
 	item_t* item = map_ref(vm, map, key);
-	if (item) {
-		assert(item->type != NIL);
-		*val = *item;
-		return true;
-	}
-	return false;
+	if (!item) return false;
+	assert(item->type != NIL);
+	*val = *item;
+	return true;
 }
 
 static void map_clr(rela_vm* vm, map_t* map, item_t key) {
@@ -1159,15 +1156,9 @@ static int compile(rela_vm* vm, int op, item_t item) {
 		code_t* back3 = vm->code.depth > 2 ? compiled(vm, -3): NULL;
 
 		// remove implicit return block dead code
-		if (op == OP_CLEAN && back1->op == OP_CLEAN) {
-			return vm->code.depth-1;
-		}
-		if (op == OP_CLEAN && back1->op == OP_RETURN) {
-			return vm->code.depth-1;
-		}
-		if (op == OP_RETURN && back1->op == OP_RETURN) {
-			return vm->code.depth-1;
-		}
+		if (op == OP_CLEAN && back1->op == OP_CLEAN) return vm->code.depth-1;
+		if (op == OP_CLEAN && back1->op == OP_RETURN) return vm->code.depth-1;
+		if (op == OP_RETURN && back1->op == OP_RETURN) return vm->code.depth-1;
 
 		// lit,find -> fname (duplicate vars, single lookup array[#array])
 		if (op == OP_FIND && back1->op == OP_LIT) {
@@ -1384,9 +1375,7 @@ static int parse_block(rela_vm* vm, const char *source, node_t *node) {
 	int offset = skip_gap(source);
 
 	// don't care about this, but Lua habits...
-	if (peek(&source[offset], "do")) {
-		offset += 2;
-	}
+	if (peek(&source[offset], "do")) offset += 2;
 
 	while (source[offset]) {
 		if ((length = skip_gap(&source[offset])) > 0) {
@@ -1414,9 +1403,7 @@ static int parse_branch(rela_vm* vm, const char *source, node_t *node) {
 	int offset = skip_gap(source);
 
 	// don't care about this, but Lua habits...
-	if (peek(&source[offset], "then")) {
-		offset += 4;
-	}
+	if (peek(&source[offset], "then")) offset += 4;
 
 	while (source[offset]) {
 		if ((length = skip_gap(&source[offset])) > 0) {
@@ -1647,7 +1634,6 @@ static int parse_node(rela_vm* vm, const char *source) {
 						}
 
 						ensure(vm, isnamefirst(source[offset]), "expected parameter: %s", &source[offset]);
-
 						length = str_skip(&source[offset], isname);
 
 						node_t *param = node_allot(vm);
@@ -1673,8 +1659,7 @@ static int parse_node(rela_vm* vm, const char *source) {
 
 				offset += skip_gap(&source[offset]);
 
-				if (!peek(&source[offset], "end"))
-				{
+				if (!peek(&source[offset], "end")) {
 					offset += parse(vm, &source[offset], RESULTS_ALL, PARSE_COMMA|PARSE_ANDOR);
 					node->args = pop(vm).node;
 				}
@@ -2653,8 +2638,6 @@ static void op_yield(rela_vm* vm) {
 	}
 
 	caller->stack.depth -= items;
-
-//	vm->routine->marks.depth += items;
 }
 
 static void op_global(rela_vm* vm) {
@@ -3289,9 +3272,7 @@ static void op_match(rela_vm* vm) {
 	pcre_free(re);
 
 #else
-
 	ensure(vm, 0, "matching not enabled; rebuild with -DPCRE");
-
 #endif
 }
 
