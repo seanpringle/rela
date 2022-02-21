@@ -48,7 +48,7 @@ enum opcode_t {
 	OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT, OPP_GNAME,
 	OPP_COPIES, OPP_UPDATE,
 	// </order-important>
-	OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_GLOBAL, OP_MAP, OP_VECTOR,
+	OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_GLOBAL, OP_MAP, OP_VECTOR, OP_VPUSH,
 	OP_META_SET, OP_META_GET, OP_UNMAP, OP_LOOP, OP_UNLOOP, OP_BREAK, OP_CONTINUE, OP_JFALSE,
 	OP_JTRUE, OP_NIL, OP_COPY, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_ASSIGN, OP_AND, OP_OR,
 	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
@@ -1318,6 +1318,11 @@ static item_t opop(rela_vm* vm) {
 	return vm->routine->other.cells[--vm->routine->other.depth];
 }
 
+static item_t otop(rela_vm* vm) {
+	assert(vm->routine->other.depth > 0);
+	return vm->routine->other.cells[vm->routine->other.depth-1];
+}
+
 static item_t pop_type(rela_vm* vm, int type) {
 	item_t i = pop(vm);
 	if (type == FLOAT && i.type == INTEGER) return number(vm, i.inum);
@@ -2393,15 +2398,17 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 	else
 	// literal vector [1,2,3]
 	if (node->type == NODE_VEC) {
-		compile(vm, OP_MARK, nil(vm));
 		assert(!node->args);
+		compile(vm, OP_VECTOR, nil(vm));
+		compile(vm, OP_MARK, nil(vm));
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++) {
 			process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
+			compile(vm, OP_VPUSH, nil(vm));
 		}
 
-		compile(vm, OP_VECTOR, nil(vm));
-		compile(vm, OP_LIMIT, integer(vm, 1));
+		compile(vm, OP_LIMIT, integer(vm, 0));
+		compile(vm, OP_SHIFT, nil(vm));
 	}
 	else
 	// literal map { a = 1, b = 2, c = nil }
@@ -2754,17 +2761,13 @@ static void op_jtrue(rela_vm* vm) {
 }
 
 static void op_vector(rela_vm* vm) {
-	int items = depth(vm);
+	opush(vm, (item_t){.type = VECTOR, .vec = vec_allot(vm)});
+}
 
-	vec_t* vec = vec_allot(vm);
-
-	for (int i = 0; i < items; i++) {
-		int index = vm->routine->stack.depth - items + i;
-		vec_push(vm, vec, *stack_ref(vm, vm->routine, index));
-	}
-
-	vm->routine->stack.depth -= items;
-	push(vm, (item_t){.type = VECTOR, .vec = vec});
+static void op_vpush(rela_vm* vm) {
+	for (int i = 0, l = depth(vm); i < l; i++)
+		vec_push(vm, otop(vm).vec, *item(vm, i));
+	op_clean(vm);
 }
 
 static void op_unpack(rela_vm* vm) {
@@ -3365,7 +3368,8 @@ func_t funcs[OPERATIONS] = {
 	[OP_GLOBAL]    = { .name = "global",    .lib = false, .func = op_global    },
 	[OP_META_SET]  = { .name = "setmeta",   .lib = true,  .func = op_meta_set  },
 	[OP_META_GET]  = { .name = "getmeta",   .lib = true,  .func = op_meta_get  },
-	[OP_VECTOR]    = { .name = "vector",    .lib = true,  .func = op_vector    },
+	[OP_VECTOR]    = { .name = "vector",    .lib = false, .func = op_vector    },
+	[OP_VPUSH]     = { .name = "vpush",     .lib = false, .func = op_vpush     },
 	[OP_MAP]       = { .name = "map",       .lib = false, .func = op_map       },
 	[OP_UNMAP]     = { .name = "unmap",     .lib = false, .func = op_unmap     },
 	[OP_MARK]      = { .name = "mark",      .lib = false, .func = op_mark      },
