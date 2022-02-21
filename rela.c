@@ -152,10 +152,8 @@ typedef struct _cor_t {
 	int ip;
 	int state;
 	struct {
-		item_t** pages;
-		int width;
+		item_t cells[STACK];
 		int depth;
-		int limit;
 	} stack;
 	struct {
 		item_t cells[STACK];
@@ -496,8 +494,8 @@ static void gc_mark_cor(rela_vm* vm, cor_t* cor) {
 		vm->cors.mark[index] = true;
 	}
 
-	for (unsigned int i = 0, l = cor->stack.depth; i < l; i++)
-		gc_mark_item(vm, cor->stack.pages[i/STACK][i%STACK]);
+	for (int i = 0, l = cor->stack.depth; i < l; i++)
+		gc_mark_item(vm, cor->stack.cells[i]);
 
 	for (int i = 0, l = cor->other.depth; i < l; i++)
 		gc_mark_item(vm, cor->other.cells[i]);
@@ -573,8 +571,6 @@ static void gc(rela_vm* vm) {
 	for (int i = 0, l = vm->cors.depth; i < l; i++) {
 		if (vm->cors.used[i] && !vm->cors.mark[i]) {
 			cor_t* cor = pool_ptr(vm, &vm->cors, i);
-			for (int i = 0; i < cor->stack.width; i++) free(cor->stack.pages[i]);
-			free(cor->stack.pages);
 			pool_free(vm, &vm->cors, cor);
 		}
 	}
@@ -1261,9 +1257,7 @@ static int compile(rela_vm* vm, int op, item_t item) {
 }
 
 static item_t* stack_ref(rela_vm* vm, cor_t* routine, int index) {
-	unsigned int page = ((unsigned int)index)/STACK;
-	unsigned int cell = ((unsigned int)index)-(page*STACK);
-	return &routine->stack.pages[page][cell];
+	return &routine->stack.cells[index];
 }
 
 static item_t* stack_cell(rela_vm* vm, int index) {
@@ -1284,14 +1278,7 @@ static item_t* item(rela_vm* vm, int i) {
 }
 
 static void push(rela_vm* vm, item_t item) {
-	if (vm->routine->stack.depth == vm->routine->stack.limit) {
-		vm->routine->stack.width++;
-		vm->routine->stack.limit += STACK;
-		vm->routine->stack.pages = realloc(vm->routine->stack.pages, vm->routine->stack.width*sizeof(item_t*));
-		ensure(vm, vm->routine->stack.pages, "oom");
-		vm->routine->stack.pages[vm->routine->stack.width-1] = malloc(sizeof(item_t)*STACK);
-		ensure(vm, vm->routine->stack.pages[vm->routine->stack.width-1], "oom");
-	}
+	assert(vm->routine->stack.depth < STACK);
 	int index = vm->routine->stack.depth++;
 	*stack_ref(vm, vm->routine, index) = item;
 }
