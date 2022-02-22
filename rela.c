@@ -20,6 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#define _GNU_SOURCE
 #include "rela.h"
 
 #include <stdlib.h>
@@ -33,6 +34,7 @@
 #include <float.h>
 #include <assert.h>
 #include <setjmp.h>
+#include <stddef.h>
 
 #ifndef NDEBUG
 #include <signal.h>
@@ -40,6 +42,11 @@
 
 #ifdef PCRE
 #include <pcre.h>
+#endif
+
+#ifdef __linux__
+#include <sys/mman.h>
+#include <errno.h>
 #endif
 
 enum opcode_t {
@@ -317,6 +324,16 @@ typedef struct _rela_vm {
 	jmp_buf jmp;
 	char err[STRTMP];
 	void* custom;
+
+#ifdef __linux__
+	struct {
+		void** iptrx;
+		unsigned char* code;
+		int depth;
+		int limit;
+	} jit;
+#endif
+
 } rela_vm;
 
 typedef int (*strcb)(int);
@@ -2096,7 +2113,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 			compile(vm, OP_PID, integer(vm, node->fpath.ids[i]));
 		}
 
-		for (int i = 0; i < vec_size(vm, node->keys); i++)
+		for (int i = 0, l = vec_size(vm, node->keys); i < l; i++)
 			process(vm, vec_get(vm, node->keys, i).node, PROCESS_ASSIGN, i, -1);
 
 		compile(vm, OP_CLEAN, nil(vm));
@@ -2833,10 +2850,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	if (!map && cor->frames.depth) {
 		assert(key.type == STRING);
 		item_t* cell = local(vm, key.str);
-		if (cell) {
-			*cell = val;
-			return;
-		}
+		if (cell) { *cell = val; return; }
 		frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
 		// todo: depth++ range limit at compile time
 		ensure(vm, frame->locals.depth < LOCALS, "max %d locals per frame", LOCALS);
@@ -3345,97 +3359,97 @@ static void nop(rela_vm* vm) {
 }
 
 func_t funcs[OPERATIONS] = {
-	[OP_STOP]      = { .name = "stop",      .lib = false, .func = op_stop      },
-	[OP_PRINT]     = { .name = "print",     .lib = true,  .func = op_print     },
-	[OP_COROUTINE] = { .name = "coroutine", .lib = true,  .func = op_coroutine },
-	[OP_RESUME]    = { .name = "resume",    .lib = true,  .func = op_resume    },
-	[OP_YIELD]     = { .name = "yield",     .lib = true,  .func = op_yield     },
-	[OP_CALL]      = { .name = "call",      .lib = false, .func = op_call      },
-	[OP_RETURN]    = { .name = "return",    .lib = false, .func = op_return    },
-	[OP_GLOBAL]    = { .name = "global",    .lib = false, .func = op_global    },
-	[OP_META_SET]  = { .name = "setmeta",   .lib = true,  .func = op_meta_set  },
-	[OP_META_GET]  = { .name = "getmeta",   .lib = true,  .func = op_meta_get  },
-	[OP_VECTOR]    = { .name = "vector",    .lib = false, .func = op_vector    },
-	[OP_VPUSH]     = { .name = "vpush",     .lib = false, .func = op_vpush     },
-	[OP_MAP]       = { .name = "map",       .lib = false, .func = op_map       },
-	[OP_UNMAP]     = { .name = "unmap",     .lib = false, .func = op_unmap     },
-	[OP_MARK]      = { .name = "mark",      .lib = false, .func = op_mark      },
-	[OP_LIMIT]     = { .name = "limit",     .lib = false, .func = op_limit     },
-	[OP_LOOP]      = { .name = "loop",      .lib = false, .func = op_loop      },
-	[OP_UNLOOP]    = { .name = "unloop",    .lib = false, .func = op_unloop    },
-	[OP_CLEAN]     = { .name = "clean",     .lib = false, .func = op_clean     },
-	[OP_BREAK]     = { .name = "break",     .lib = false, .func = op_break     },
-	[OP_CONTINUE]  = { .name = "continue",  .lib = false, .func = op_continue  },
-	[OP_JMP]       = { .name = "jmp",       .lib = false, .func = op_jmp       },
-	[OP_JFALSE]    = { .name = "jfalse",    .lib = false, .func = op_jfalse    },
-	[OP_JTRUE]     = { .name = "jtrue",     .lib = false, .func = op_jtrue     },
-	[OP_FOR]       = { .name = "for",       .lib = false, .func = op_for       },
-	[OP_NIL]       = { .name = "nil",       .lib = false, .func = op_nil       },
-	[OP_COPY]      = { .name = "copy",      .lib = false, .func = op_copy      },
-	[OP_SHUNT]     = { .name = "shunt",     .lib = false, .func = op_shunt     },
-	[OP_SHIFT]     = { .name = "shift",     .lib = false, .func = op_shift     },
-	[OP_TRUE]      = { .name = "true",      .lib = false, .func = op_true      },
-	[OP_FALSE]     = { .name = "false",     .lib = false, .func = op_false     },
-	[OP_LIT]       = { .name = "lit",       .lib = false, .func = op_lit       },
-	[OP_ASSIGN]    = { .name = "assign",    .lib = false, .func = op_assign    },
-	[OP_FIND]      = { .name = "find",      .lib = false, .func = op_find      },
-	[OP_SET]       = { .name = "set",       .lib = false, .func = op_set       },
-	[OP_GET]       = { .name = "get",       .lib = false, .func = op_get       },
-	[OP_COUNT]     = { .name = "count",     .lib = false, .func = op_count     },
-	[OP_DROP]      = { .name = "drop",      .lib = false, .func = op_drop      },
-	[OP_ADD]       = { .name = "add",       .lib = false, .func = op_add       },
-	[OP_NEG]       = { .name = "neg",       .lib = false, .func = op_neg       },
-	[OP_SUB]       = { .name = "sub",       .lib = false, .func = op_sub       },
-	[OP_MUL]       = { .name = "mul",       .lib = false, .func = op_mul       },
-	[OP_DIV]       = { .name = "div",       .lib = false, .func = op_div       },
-	[OP_MOD]       = { .name = "mod",       .lib = false, .func = op_mod       },
-	[OP_NOT]       = { .name = "not",       .lib = false, .func = op_not       },
-	[OP_EQ]        = { .name = "eq",        .lib = false, .func = op_eq        },
-	[OP_NE]        = { .name = "ne",        .lib = false, .func = op_ne        },
-	[OP_LT]        = { .name = "lt",        .lib = false, .func = op_lt        },
-	[OP_LTE]       = { .name = "lte",       .lib = false, .func = op_lte       },
-	[OP_GT]        = { .name = "gt",        .lib = false, .func = op_gt        },
-	[OP_GTE]       = { .name = "gte",       .lib = false, .func = op_gte       },
-	[OP_AND]       = { .name = "and",       .lib = false, .func = nop          },
-	[OP_OR]        = { .name = "or",        .lib = false, .func = nop          },
-	[OP_CONCAT]    = { .name = "concat",    .lib = false, .func = op_concat    },
-	[OP_UNPACK]    = { .name = "unpack",    .lib = false, .func = op_unpack    },
-	[OP_MATCH]     = { .name = "match",     .lib = false, .func = op_match     },
-	[OP_SORT]      = { .name = "sort",      .lib = true,  .func = op_sort      },
-	[OP_PID]       = { .name = "pid",       .lib = false, .func = op_pid       },
-	[OP_ASSERT]    = { .name = "assert",    .lib = true,  .func = op_assert    },
-	[OP_TYPE]      = { .name = "type",      .lib = true,  .func = op_type      },
-	[OP_GC]        = { .name = "collect",   .lib = true,  .func = gc           },
+	[OP_STOP]      = { .name = "stop",      .lib = false, .func = op_stop,      },
+	[OP_PRINT]     = { .name = "print",     .lib = true,  .func = op_print,     },
+	[OP_COROUTINE] = { .name = "coroutine", .lib = true,  .func = op_coroutine, },
+	[OP_RESUME]    = { .name = "resume",    .lib = true,  .func = op_resume,    },
+	[OP_YIELD]     = { .name = "yield",     .lib = true,  .func = op_yield,     },
+	[OP_CALL]      = { .name = "call",      .lib = false, .func = op_call,      },
+	[OP_RETURN]    = { .name = "return",    .lib = false, .func = op_return,    },
+	[OP_GLOBAL]    = { .name = "global",    .lib = false, .func = op_global,    },
+	[OP_META_SET]  = { .name = "setmeta",   .lib = true,  .func = op_meta_set,  },
+	[OP_META_GET]  = { .name = "getmeta",   .lib = true,  .func = op_meta_get,  },
+	[OP_VECTOR]    = { .name = "vector",    .lib = false, .func = op_vector,    },
+	[OP_VPUSH]     = { .name = "vpush",     .lib = false, .func = op_vpush,     },
+	[OP_MAP]       = { .name = "map",       .lib = false, .func = op_map,       },
+	[OP_UNMAP]     = { .name = "unmap",     .lib = false, .func = op_unmap,     },
+	[OP_MARK]      = { .name = "mark",      .lib = false, .func = op_mark,      },
+	[OP_LIMIT]     = { .name = "limit",     .lib = false, .func = op_limit,     },
+	[OP_LOOP]      = { .name = "loop",      .lib = false, .func = op_loop,      },
+	[OP_UNLOOP]    = { .name = "unloop",    .lib = false, .func = op_unloop,    },
+	[OP_CLEAN]     = { .name = "clean",     .lib = false, .func = op_clean,     },
+	[OP_BREAK]     = { .name = "break",     .lib = false, .func = op_break,     },
+	[OP_CONTINUE]  = { .name = "continue",  .lib = false, .func = op_continue,  },
+	[OP_JMP]       = { .name = "jmp",       .lib = false, .func = op_jmp,       },
+	[OP_JFALSE]    = { .name = "jfalse",    .lib = false, .func = op_jfalse,    },
+	[OP_JTRUE]     = { .name = "jtrue",     .lib = false, .func = op_jtrue,     },
+	[OP_FOR]       = { .name = "for",       .lib = false, .func = op_for,       },
+	[OP_NIL]       = { .name = "nil",       .lib = false, .func = op_nil,       },
+	[OP_COPY]      = { .name = "copy",      .lib = false, .func = op_copy,      },
+	[OP_SHUNT]     = { .name = "shunt",     .lib = false, .func = op_shunt,     },
+	[OP_SHIFT]     = { .name = "shift",     .lib = false, .func = op_shift,     },
+	[OP_TRUE]      = { .name = "true",      .lib = false, .func = op_true,      },
+	[OP_FALSE]     = { .name = "false",     .lib = false, .func = op_false,     },
+	[OP_LIT]       = { .name = "lit",       .lib = false, .func = op_lit,       },
+	[OP_ASSIGN]    = { .name = "assign",    .lib = false, .func = op_assign,    },
+	[OP_FIND]      = { .name = "find",      .lib = false, .func = op_find,      },
+	[OP_SET]       = { .name = "set",       .lib = false, .func = op_set,       },
+	[OP_GET]       = { .name = "get",       .lib = false, .func = op_get,       },
+	[OP_COUNT]     = { .name = "count",     .lib = false, .func = op_count,     },
+	[OP_DROP]      = { .name = "drop",      .lib = false, .func = op_drop,      },
+	[OP_ADD]       = { .name = "add",       .lib = false, .func = op_add,       },
+	[OP_NEG]       = { .name = "neg",       .lib = false, .func = op_neg,       },
+	[OP_SUB]       = { .name = "sub",       .lib = false, .func = op_sub,       },
+	[OP_MUL]       = { .name = "mul",       .lib = false, .func = op_mul,       },
+	[OP_DIV]       = { .name = "div",       .lib = false, .func = op_div,       },
+	[OP_MOD]       = { .name = "mod",       .lib = false, .func = op_mod,       },
+	[OP_NOT]       = { .name = "not",       .lib = false, .func = op_not,       },
+	[OP_EQ]        = { .name = "eq",        .lib = false, .func = op_eq,        },
+	[OP_NE]        = { .name = "ne",        .lib = false, .func = op_ne,        },
+	[OP_LT]        = { .name = "lt",        .lib = false, .func = op_lt,        },
+	[OP_LTE]       = { .name = "lte",       .lib = false, .func = op_lte,       },
+	[OP_GT]        = { .name = "gt",        .lib = false, .func = op_gt,        },
+	[OP_GTE]       = { .name = "gte",       .lib = false, .func = op_gte,       },
+	[OP_AND]       = { .name = "and",       .lib = false, .func = nop,          },
+	[OP_OR]        = { .name = "or",        .lib = false, .func = nop,          },
+	[OP_CONCAT]    = { .name = "concat",    .lib = false, .func = op_concat,    },
+	[OP_UNPACK]    = { .name = "unpack",    .lib = false, .func = op_unpack,    },
+	[OP_MATCH]     = { .name = "match",     .lib = false, .func = op_match,     },
+	[OP_SORT]      = { .name = "sort",      .lib = true,  .func = op_sort,      },
+	[OP_PID]       = { .name = "pid",       .lib = false, .func = op_pid,       },
+	[OP_ASSERT]    = { .name = "assert",    .lib = true,  .func = op_assert,    },
+	[OP_TYPE]      = { .name = "type",      .lib = true,  .func = op_type,      },
+	[OP_GC]        = { .name = "collect",   .lib = true,  .func = gc,           },
 	// math
-	[OP_SIN]       = { .name = "sin",       .lib = true, .func = op_sin       },
-	[OP_COS]       = { .name = "cos",       .lib = true, .func = op_cos       },
-	[OP_TAN]       = { .name = "tan",       .lib = true, .func = op_tan       },
-	[OP_ASIN]      = { .name = "asin",      .lib = true, .func = op_asin      },
-	[OP_ACOS]      = { .name = "acos",      .lib = true, .func = op_acos      },
-	[OP_ATAN]      = { .name = "atan",      .lib = true, .func = op_atan      },
-	[OP_COSH]      = { .name = "cosh",      .lib = true, .func = op_cosh      },
-	[OP_SINH]      = { .name = "sinh",      .lib = true, .func = op_sinh      },
-	[OP_TANH]      = { .name = "tanh",      .lib = true, .func = op_tanh      },
-	[OP_CEIL]      = { .name = "ceil",      .lib = true, .func = op_ceil      },
-	[OP_FLOOR]     = { .name = "floor",     .lib = true, .func = op_floor     },
-	[OP_SQRT]      = { .name = "sqrt",      .lib = true, .func = op_sqrt      },
-	[OP_ABS]       = { .name = "abs",       .lib = true, .func = op_abs       },
-	[OP_ATAN2]     = { .name = "atan2",     .lib = true, .func = op_atan2     },
-	[OP_LOG]       = { .name = "log",       .lib = true, .func = op_log       },
-	[OP_LOG10]     = { .name = "log10",     .lib = true, .func = op_log10     },
-	[OP_POW]       = { .name = "pow",       .lib = true, .func = op_pow       },
-	[OP_MIN]       = { .name = "min",       .lib = true, .func = op_min       },
-	[OP_MAX]       = { .name = "max",       .lib = true, .func = op_max       },
+	[OP_SIN]       = { .name = "sin",       .lib = true,  .func = op_sin,       },
+	[OP_COS]       = { .name = "cos",       .lib = true,  .func = op_cos,       },
+	[OP_TAN]       = { .name = "tan",       .lib = true,  .func = op_tan,       },
+	[OP_ASIN]      = { .name = "asin",      .lib = true,  .func = op_asin,      },
+	[OP_ACOS]      = { .name = "acos",      .lib = true,  .func = op_acos,      },
+	[OP_ATAN]      = { .name = "atan",      .lib = true,  .func = op_atan,      },
+	[OP_COSH]      = { .name = "cosh",      .lib = true,  .func = op_cosh,      },
+	[OP_SINH]      = { .name = "sinh",      .lib = true,  .func = op_sinh,      },
+	[OP_TANH]      = { .name = "tanh",      .lib = true,  .func = op_tanh,      },
+	[OP_CEIL]      = { .name = "ceil",      .lib = true,  .func = op_ceil,      },
+	[OP_FLOOR]     = { .name = "floor",     .lib = true,  .func = op_floor,     },
+	[OP_SQRT]      = { .name = "sqrt",      .lib = true,  .func = op_sqrt,      },
+	[OP_ABS]       = { .name = "abs",       .lib = true,  .func = op_abs,       },
+	[OP_ATAN2]     = { .name = "atan2",     .lib = true,  .func = op_atan2,     },
+	[OP_LOG]       = { .name = "log",       .lib = true,  .func = op_log,       },
+	[OP_LOG10]     = { .name = "log10",     .lib = true,  .func = op_log10,     },
+	[OP_POW]       = { .name = "pow",       .lib = true,  .func = op_pow,       },
+	[OP_MIN]       = { .name = "min",       .lib = true,  .func = op_min,       },
+	[OP_MAX]       = { .name = "max",       .lib = true,  .func = op_max,       },
 	// peephole
-	[OPP_FNAME]    = { .name = "fname",     .lib = false, .func = op_fname     },
-	[OPP_GNAME]    = { .name = "gname",     .lib = false, .func = op_gname     },
-	[OPP_CFUNC]    = { .name = "cfunc",     .lib = false, .func = op_cfunc     },
-	[OPP_ASSIGNP]  = { .name = "assignp",   .lib = false, .func = op_assignp   },
-	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl   },
-	[OPP_MUL_LIT]  = { .name = "litmul",    .lib = false, .func = op_mul_lit   },
-	[OPP_ADD_LIT]  = { .name = "litadd",    .lib = false, .func = op_add_lit   },
-	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies    },
-	[OPP_UPDATE]   = { .name = "update",    .lib = false, .func = op_update    },
+	[OPP_FNAME]    = { .name = "fname",     .lib = false, .func = op_fname,     },
+	[OPP_GNAME]    = { .name = "gname",     .lib = false, .func = op_gname,     },
+	[OPP_CFUNC]    = { .name = "cfunc",     .lib = false, .func = op_cfunc,     },
+	[OPP_ASSIGNP]  = { .name = "assignp",   .lib = false, .func = op_assignp,   },
+	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl,   },
+	[OPP_MUL_LIT]  = { .name = "litmul",    .lib = false, .func = op_mul_lit,   },
+	[OPP_ADD_LIT]  = { .name = "litadd",    .lib = false, .func = op_add_lit,   },
+	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies,    },
+	[OPP_UPDATE]   = { .name = "update",    .lib = false, .func = op_update,    },
 };
 
 static void decompile(rela_vm* vm, code_t* c) {
@@ -3443,6 +3457,457 @@ static void decompile(rela_vm* vm, code_t* c) {
 	const char *str = tmptext(vm, c->item, tmp, sizeof(tmp));
 	fprintf(stderr, "%04ld  %3d  %-10s  %s\n", c - vm->code.cells, c->cache, funcs[c->op].name, str);
 	fflush(stderr);
+}
+
+static void jit_byte(rela_vm* vm, unsigned char b) {
+	unsigned char *p = vm->jit.code + vm->jit.depth;
+	*p = b;
+	vm->jit.depth++;
+}
+
+static void jit_int(rela_vm* vm, int i) {
+	int* p = (int*)(vm->jit.code + vm->jit.depth);
+	memcpy(p, &i, 4);
+	vm->jit.depth += 4;
+}
+
+static void jit_addr(rela_vm* vm, void* a) {
+	void** p = (void*)(vm->jit.code + vm->jit.depth);
+	memcpy(p, &a, 8);
+	vm->jit.depth += 8;
+}
+
+void hi(int i) {
+	fprintf(stderr, "hi %d\n", i);
+	fflush(stderr);
+}
+
+static void jit(rela_vm* vm) {
+#ifdef __linux__
+	vm->jit.limit = vm->code.depth * 128;
+
+	vm->jit.code = mmap(0, vm->jit.limit, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	ensure(vm, vm->jit.code, "mmap %d", errno);
+
+	vm->jit.iptrx = calloc(vm->code.depth, sizeof(void*));
+	ensure(vm, vm->jit.iptrx, "oom");
+
+	// function prefix
+	// callee-saved registers
+	jit_byte(vm, 0x55); // push rbp
+	jit_byte(vm, 0x53); // push rbx
+	jit_byte(vm, 0x41); // push r15
+	jit_byte(vm, 0x57);
+	jit_byte(vm, 0x41); // push r14
+	jit_byte(vm, 0x56);
+	jit_byte(vm, 0x41); // push r13
+	jit_byte(vm, 0x55);
+	jit_byte(vm, 0x41); // push r12
+	jit_byte(vm, 0x54);
+
+	jit_byte(vm, 0x6a); // push qword 0
+	jit_byte(vm, 0x00);
+
+	jit_byte(vm, 0x48); // mov rbp, rsp
+	jit_byte(vm, 0x89);
+	jit_byte(vm, 0xe5);
+
+//	for (int i = 0, l = vm->jit.depth; i < l; ) {
+//		for (int j = i+8; i < j; i++) {
+//			fprintf(stderr, "%02x ", vm->jit.code[i]);
+//		}
+//		fprintf(stderr, " ");
+//		for (int j = i+8; i < j; i++) {
+//			fprintf(stderr, "%02x ", vm->jit.code[i]);
+//		}
+//		fprintf(stderr, "\n");
+//	}
+//
+//	fprintf(stderr, "%08lx\n", (size_t)hi);
+
+	jit_byte(vm, 0x49); // mov r15,vm
+	jit_byte(vm, 0xbf);
+	jit_addr(vm, vm);
+	jit_byte(vm, 0x49); // mov r14,&routine
+	jit_byte(vm, 0xbe);
+	jit_addr(vm, &vm->routine);
+	jit_byte(vm, 0x49); // mov r13,vm->jit.iptrx
+	jit_byte(vm, 0xbd);
+	jit_addr(vm, vm->jit.iptrx);
+
+//	jit_byte(vm, 0xeb);
+//	jit_byte(vm, 0x12);
+//
+//	// <debug>
+//	int debug = vm->code.depth;
+//	jit_byte(vm, 0x48);
+//	jit_byte(vm, 0xb8);
+//	jit_addr(vm, hi);
+//	jit_byte(vm, 0xff);
+//	jit_byte(vm, 0xd0);
+//	jit_byte(vm, 0xc3);
+//	// </debug>
+
+	for (int i = 0, l = vm->code.depth; i < l; i++) {
+		vm->jit.iptrx[i] = &vm->jit.code[vm->jit.depth];
+		code_t code = vm->code.cells[i];
+
+//		jit_byte(vm, 0xbf);
+//		jit_int(vm, i);
+//		jit_byte(vm, 0x48);
+//		jit_byte(vm, 0xb8);
+//		jit_addr(vm, hi);
+//		jit_byte(vm, 0xff);
+//		jit_byte(vm, 0xd0);
+
+		switch (code.op) {
+			case OP_STOP:
+				// function suffix
+				jit_byte(vm, 0x58); // align rsp
+				jit_byte(vm, 0x41); // pop r15
+				jit_byte(vm, 0x5f);
+				jit_byte(vm, 0x41); // pop r14
+				jit_byte(vm, 0x5e);
+				jit_byte(vm, 0x41); // pop r13
+				jit_byte(vm, 0x5d);
+				jit_byte(vm, 0x41); // pop r12
+				jit_byte(vm, 0x5c);
+				jit_byte(vm, 0x5b); // pop rbx
+				jit_byte(vm, 0x5d); // pop rbp
+				jit_byte(vm, 0xc3); // ret
+				break;
+
+//			case OP_PRINT:
+//			case OP_GLOBAL:
+//			case OP_META_SET:
+//			case OP_META_GET:
+//			case OP_VECTOR:
+//			case OP_VPUSH:
+//			case OP_MAP:
+//			case OP_UNMAP:
+//			case OP_MARK:
+//			case OP_LIMIT:
+//			case OP_CLEAN:
+//			case OP_NIL:
+//			case OP_COPY:
+//			case OP_SHUNT:
+//			case OP_SHIFT:
+//			case OP_TRUE:
+//			case OP_FALSE:
+//			case OP_LIT:
+//			case OP_ASSIGN:
+//			case OP_FIND:
+//			case OP_SET:
+//			case OP_GET:
+//			case OP_COUNT:
+//			case OP_DROP:
+//			case OP_ADD:
+//			case OP_NEG:
+//			case OP_SUB:
+//			case OP_MUL:
+//			case OP_DIV:
+//			case OP_MOD:
+//			case OP_NOT:
+//			case OP_EQ:
+//			case OP_NE:
+//			case OP_LT:
+//			case OP_LTE:
+//			case OP_GT:
+//			case OP_GTE:
+//			case OP_AND:
+//			case OP_OR:
+//			case OP_CONCAT:
+//			case OP_UNPACK:
+//			case OP_MATCH:
+//			case OP_SORT:
+//			case OP_PID:
+//			case OP_ASSERT:
+//			case OP_TYPE:
+//			case OP_GC:
+//			case OP_SIN:
+//			case OP_COS:
+//			case OP_TAN:
+//			case OP_ASIN:
+//			case OP_ACOS:
+//			case OP_ATAN:
+//			case OP_COSH:
+//			case OP_SINH:
+//			case OP_TANH:
+//			case OP_CEIL:
+//			case OP_FLOOR:
+//			case OP_SQRT:
+//			case OP_ABS:
+//			case OP_ATAN2:
+//			case OP_LOG:
+//			case OP_LOG10:
+//			case OP_POW:
+//			case OP_MIN:
+//			case OP_MAX:
+//			case OPP_FNAME:
+//			case OPP_GNAME:
+//			case OPP_ASSIGNP:
+//			case OPP_ASSIGNL:
+			case OPP_MUL_LIT:
+				// fetch routine
+				jit_byte(vm, 0x4d); // mov r12,[r14]
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x26);
+				// lea r8,[r12+stack.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x84);
+				jit_byte(vm, 0x24);
+				jit_int(vm, offsetof(cor_t, stack.cells));
+				// mov r9,[r12+stack.depth]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x8c);
+				jit_byte(vm, 0x24);
+				jit_int(vm, offsetof(cor_t, stack.depth));
+				// dec r9
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xc9);
+				// shl r9,4
+				assert(sizeof(item_t) == 16);
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0xc1);
+				jit_byte(vm, 0xe1);
+				jit_byte(vm, 0x04);
+				// add r9,r8
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x01);
+				jit_byte(vm, 0xc1);
+				// add r9,offsetinum
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x81);
+				jit_byte(vm, 0xc1);
+				jit_int(vm, offsetof(item_t, inum));
+				// mov rax,[r9]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x01);
+				// imul rax,n
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0x69);
+				jit_byte(vm, 0xc0);
+				jit_int(vm, code.item.inum);
+				// mov [r9],rax
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x89);
+				jit_byte(vm, 0x01);
+				break;
+//			case OPP_ADD_LIT:
+//			case OPP_COPIES:
+//			case OPP_UPDATE:
+
+			case OP_JMP:
+				// mov rax,[r13+ip]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x85);
+				jit_int(vm, code.item.inum*8);
+				// jmp rax
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xe0);
+				break;
+
+			case OP_COROUTINE:
+			case OP_RESUME:
+			case OP_YIELD:
+			case OP_CALL:
+			case OP_RETURN:
+			case OP_LOOP:
+			case OP_UNLOOP:
+			case OP_BREAK:
+			case OP_CONTINUE:
+//			case OP_JMP:
+			case OP_JFALSE:
+			case OP_JTRUE:
+			case OP_FOR:
+			case OPP_CFUNC:
+				// fetch routine
+				jit_byte(vm, 0x4d); // mov r12,[r14]
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x26);
+				// set ip
+				jit_byte(vm, 0x41); // mov dword [r12+ipoffset],n
+				jit_byte(vm, 0xc7);
+				jit_byte(vm, 0x84);
+				jit_byte(vm, 0x24);
+				jit_int(vm, offsetof(cor_t, ip));
+				jit_int(vm, i+1);
+				// arg1 vm
+				jit_byte(vm, 0x4c); // mov rdi,r15
+				jit_byte(vm, 0x89);
+				jit_byte(vm, 0xff);
+				// call
+				jit_byte(vm, 0x48); // mov rax,fn
+				jit_byte(vm, 0xb8);
+				jit_addr(vm, funcs[code.op].func);
+				jit_byte(vm, 0xff); // call rax
+				jit_byte(vm, 0xd0);
+				// fetch routine
+				jit_byte(vm, 0x4d); // mov r12,[r14]
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x26);
+				// index iptrx
+				jit_byte(vm, 0x41); // mov eax,[r12+ipoffset]
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x84);
+				jit_byte(vm, 0x24);
+				jit_int(vm, offsetof(cor_t, ip));
+				jit_byte(vm, 0xc1); // shl eax,3
+				jit_byte(vm, 0xe0);
+				jit_byte(vm, 0x03);
+				jit_byte(vm, 0x4c); // add rax,r13
+				jit_byte(vm, 0x01);
+				jit_byte(vm, 0xe8);
+				// jmp ip
+				jit_byte(vm, 0xff); // jmp [rax]
+				jit_byte(vm, 0x20);
+				break;
+
+			default:
+				// fetch routine
+				jit_byte(vm, 0x4d); // mov r12,[r14]
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x26);
+				// set ip
+				jit_byte(vm, 0x41); // mov dword [r12+ipoffset],n
+				jit_byte(vm, 0xc7);
+				jit_byte(vm, 0x84);
+				jit_byte(vm, 0x24);
+				jit_int(vm, offsetof(cor_t, ip));
+				jit_int(vm, i+1);
+				// arg1 vm
+				jit_byte(vm, 0x4c); // mov rsi,r15
+				jit_byte(vm, 0x89);
+				jit_byte(vm, 0xff);
+				// call
+				jit_byte(vm, 0x48); // mov qword rax,fn
+				jit_byte(vm, 0xb8);
+				jit_addr(vm, funcs[code.op].func);
+				jit_byte(vm, 0xff); // call rax
+				jit_byte(vm, 0xd0);
+				break;
+		}
+	}
+
+	// function suffix
+	jit_byte(vm, 0x58); // align rsp
+	jit_byte(vm, 0x41); // pop r15
+	jit_byte(vm, 0x5f);
+	jit_byte(vm, 0x41); // pop r14
+	jit_byte(vm, 0x5e);
+	jit_byte(vm, 0x41); // pop r13
+	jit_byte(vm, 0x5d);
+	jit_byte(vm, 0x41); // pop r12
+	jit_byte(vm, 0x5c);
+	jit_byte(vm, 0x5b); // pop rbx
+	jit_byte(vm, 0x5d); // pop rbp
+	jit_byte(vm, 0xc3); // ret
+
+	fprintf(stderr, "code %u jit %u %u\n", vm->code.depth, vm->jit.depth, vm->jit.limit);
+
+	ensure(vm, 0 == mprotect(vm->jit.code, vm->jit.limit, PROT_READ | PROT_EXEC), "mprotect %d", errno);
+#endif
+}
+
+#ifdef TRACE
+// tick() tracing tmptext() may call meta-methods
+// with tick() recursion. only output the trace at
+// the top level.
+bool tracing;
+#endif
+
+static bool tick(rela_vm* vm) {
+	int ip = vm->routine->ip++;
+	assert(ip >= 0 && ip < vm->code.depth);
+	int opcode = vm->code.cells[ip].op;
+
+	#ifdef TRACE
+		if (!tracing) {
+			tracing = true;
+			code_t* c = &vm->code.cells[ip];
+			char tmpA[STRTMP];
+			const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
+			for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
+				fprintf(stderr, "  ");
+			fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
+			fflush(stderr);
+			tracing = false;
+		}
+	#endif
+
+	switch (opcode) {
+		// <order-important>
+		case OP_STOP: { return false; break; }
+		case OP_JMP: { op_jmp(vm); break; }
+		case OP_FOR: { op_for(vm); break; }
+		case OP_PID: { op_pid(vm); break; }
+		case OP_LIT: { op_lit(vm); break; }
+		case OP_MARK: { op_mark(vm); break; }
+		case OP_LIMIT: { op_limit(vm); break; }
+		case OP_CLEAN: { op_clean(vm); break; }
+		case OP_RETURN: { op_return(vm); break; }
+		case OPP_FNAME: { op_fname(vm); break; }
+		case OPP_CFUNC: { op_cfunc(vm); break; }
+		case OPP_ASSIGNL: { op_assignl(vm); break; }
+		case OPP_ASSIGNP: { op_assignp(vm); break; }
+		case OPP_MUL_LIT: { op_mul_lit(vm); break; }
+		case OPP_ADD_LIT: { op_add_lit(vm); break; }
+		// </order-important>
+		default: funcs[opcode].func(vm); break;
+	}
+
+	#ifdef TRACE
+		if (!tracing) {
+			tracing = true;
+			fprintf(stderr, "[");
+			for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
+				if (i == l-depth(vm))
+					fprintf(stderr, "|");
+				char tmpB[STRTMP];
+				fprintf(stderr, "%s%s",
+					tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
+					(i < l-1 ? ", ":"")
+				);
+			}
+			fprintf(stderr, "]\n");
+			fflush(stderr);
+			tracing = false;
+		}
+	#endif
+
+	return true;
+}
+
+static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, item_t* retv) {
+	ensure(vm, func.type == SUBROUTINE || func.type == CALLBACK, "invalid method");
+
+	cor_t* cor = vm->routine;
+	int frame = cor->frames.depth;
+
+	op_mark(vm);
+
+	for (int i = 0; i < argc; i++) push(vm, argv[i]);
+
+	call(vm, func);
+
+	if (func.type == SUBROUTINE) {
+		while (tick(vm)) {
+			if (vm->routine != cor) continue;
+			if (frame < cor->frames.depth) continue;
+			break;
+		}
+	}
+
+	for (int i = 0; i < retc; i++) {
+		retv[i] = i < depth(vm) ? *item(vm, i): nil(vm);
+	}
+
+	limit(vm, 0);
 }
 
 static void destroy(rela_vm* vm) {
@@ -3556,6 +4021,7 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 		if (code->op == OPP_CFUNC) code->cache = vm->cache.cfuncs++;
 	}
 
+	jit(vm);
 	gc(vm);
 	return vm;
 }
@@ -3566,102 +4032,6 @@ void* rela_custom(rela_vm* vm) {
 
 int rela_run(rela_vm* vm) {
 	return rela_run_ex(vm, 1, (int[]){0});
-}
-
-#ifdef TRACE
-// tick() tracing tmptext() may call meta-methods
-// with tick() recursion. only output the trace at
-// the top level.
-bool tracing;
-#endif
-
-static bool tick(rela_vm* vm) {
-	int ip = vm->routine->ip++;
-	assert(ip >= 0 && ip < vm->code.depth);
-	int opcode = vm->code.cells[ip].op;
-
-	#ifdef TRACE
-		if (!tracing) {
-			tracing = true;
-			code_t* c = &vm->code.cells[ip];
-			char tmpA[STRTMP];
-			const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
-			for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
-				fprintf(stderr, "  ");
-			fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
-			fflush(stderr);
-			tracing = false;
-		}
-	#endif
-
-	switch (opcode) {
-		// <order-important>
-		case OP_STOP: { return false; break; }
-		case OP_JMP: { op_jmp(vm); break; }
-		case OP_FOR: { op_for(vm); break; }
-		case OP_PID: { op_pid(vm); break; }
-		case OP_LIT: { op_lit(vm); break; }
-		case OP_MARK: { op_mark(vm); break; }
-		case OP_LIMIT: { op_limit(vm); break; }
-		case OP_CLEAN: { op_clean(vm); break; }
-		case OP_RETURN: { op_return(vm); break; }
-		case OPP_FNAME: { op_fname(vm); break; }
-		case OPP_CFUNC: { op_cfunc(vm); break; }
-		case OPP_ASSIGNL: { op_assignl(vm); break; }
-		case OPP_ASSIGNP: { op_assignp(vm); break; }
-		case OPP_MUL_LIT: { op_mul_lit(vm); break; }
-		case OPP_ADD_LIT: { op_add_lit(vm); break; }
-		// </order-important>
-		default: funcs[opcode].func(vm); break;
-	}
-
-	#ifdef TRACE
-		if (!tracing) {
-			tracing = true;
-			fprintf(stderr, "[");
-			for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
-				if (i == l-depth(vm))
-					fprintf(stderr, "|");
-				char tmpB[STRTMP];
-				fprintf(stderr, "%s%s",
-					tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
-					(i < l-1 ? ", ":"")
-				);
-			}
-			fprintf(stderr, "]\n");
-			fflush(stderr);
-			tracing = false;
-		}
-	#endif
-
-	return true;
-}
-
-static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, item_t* retv) {
-	ensure(vm, func.type == SUBROUTINE || func.type == CALLBACK, "invalid method");
-
-	cor_t* cor = vm->routine;
-	int frame = cor->frames.depth;
-
-	op_mark(vm);
-
-	for (int i = 0; i < argc; i++) push(vm, argv[i]);
-
-	call(vm, func);
-
-	if (func.type == SUBROUTINE) {
-		while (tick(vm)) {
-			if (vm->routine != cor) continue;
-			if (frame < cor->frames.depth) continue;
-			break;
-		}
-	}
-
-	for (int i = 0; i < retc; i++) {
-		retv[i] = i < depth(vm) ? *item(vm, i): nil(vm);
-	}
-
-	limit(vm, 0);
 }
 
 int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
@@ -3684,7 +4054,13 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	for (int mod = 0; mod < modules; mod++) {
 		ensure(vm, modlist[mod] < vec_size(vm, &vm->modules.entries), "invalid module %d", modlist[mod]);
 		vm->routine->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
-		while (tick(vm));
+		#ifdef __linux__
+//			void (*call)() = vm->jit.iptrx[vm->routine->ip];
+			void (*call)() = (void*)(vm->jit.code);
+			call();
+		#else
+			while (tick(vm));
+		#endif
 	}
 	reset(vm);
 	return 0;
