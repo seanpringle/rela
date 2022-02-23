@@ -16,7 +16,7 @@ rel: rela.o cli.o
 	ar rcs librela.a rela.o
 
 prof: rel
-	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 CPUPROFILE=/tmp/rela.prof ./rela bench.rela
+	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 CPUPROFILE=/tmp/rela.prof ./rela test.rela
 	google-pprof --web ./rela /tmp/rela.prof
 
 %.o: %.c *.h

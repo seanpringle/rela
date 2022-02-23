@@ -3601,6 +3601,117 @@ static void jit(rela_vm* vm) {
 				jit_byte(vm, 0xc3); // ret
 				break;
 
+			case OP_PID:
+				// frame_t* frame = &vm->routine->frames.cells[vm->routine->frames.depth-1];
+				// frame->path.cells[frame->path.depth++] = literal(vm).inum;
+
+				// fetch routine
+				// mov r10,[r14]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x16);
+
+				// r9 = &vm->routine->frames.cells
+				// lea r9,[r10+frames.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x8a);
+				jit_int(vm, offsetof(cor_t, frames.cells));
+
+				// r8 = &vm->routine->frames.depth
+				// lea r8,[r10+frames.depth]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, frames.depth));
+
+				// eax = vm->routine->frames.depth
+				// mov eax,[r8]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x00);
+
+				// eax = vm->routine->frames.depth-1
+				// dec eax
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xc8);
+
+				// eax = (vm->routine->frames.depth-1)*sizeof(frame_t)
+				// imul eax,n
+				jit_byte(vm, 0x69);
+				jit_byte(vm, 0xc0);
+				jit_int(vm, sizeof(frame_t));
+
+				// r9 = &vm->routine->frame.cells[vm->routine->frames.depth-1]
+				// add r9,rax
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x01);
+				jit_byte(vm, 0xc1);
+
+				// r10 = &frame->path.cells
+				// lea r10,[r9+path.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x91);
+				jit_int(vm, offsetof(frame_t, path.cells));
+
+				// r11 = &frame->path.depth
+				// lea r11,[r9+path.depth]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x99);
+				jit_int(vm, offsetof(frame_t, path.depth));
+
+				// eax = frame->path.depth
+				// mov eax,[r11]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x03);
+
+				// eax = frame->path.depth*4
+				// shl eax,2
+				jit_byte(vm, 0xc1);
+				jit_byte(vm, 0xe0);
+				jit_byte(vm, 0x02);
+
+				// r10 = &frame->path[frame->path.depth]
+				// add r10,rax
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x01);
+				jit_byte(vm, 0xc2);
+
+				int n = 0;
+
+				for (;;) {
+					n++;
+					// mov dword [r10],literal
+					jit_byte(vm, 0x41);
+					jit_byte(vm, 0xc7);
+					jit_byte(vm, 0x02);
+					jit_int(vm, code.item.inum);
+
+					if (i+1 < l && vm->code.cells[i+1].op == OP_PID) {
+						code = vm->code.cells[++i];
+						vm->jit.iptrx[i] = NULL;
+						// add r10,4
+						jit_byte(vm, 0x49);
+						jit_byte(vm, 0x83);
+						jit_byte(vm, 0xc2);
+						jit_byte(vm, 0x04);
+						continue;
+					}
+
+					break;
+				}
+
+				// add dword [r11],n
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x83);
+				jit_byte(vm, 0x03);
+				jit_byte(vm, n);
+
+				break;
+
 			case OP_JMP:
 				// indirect address from iptrx
 				// mov rax,[r13+ip]
@@ -3656,7 +3767,6 @@ static void jit(rela_vm* vm) {
 //			case OP_UNPACK:
 //			case OP_MATCH:
 //			case OP_SORT:
-//			case OP_PID:
 //			case OP_ASSERT:
 //			case OP_TYPE:
 //			case OP_GC:
@@ -3686,7 +3796,6 @@ static void jit(rela_vm* vm) {
 //			case OPP_MUL_LIT:
 //			case OPP_COPIES:
 
-			case OPP_UPDATE:
 			case OP_COROUTINE:
 			case OP_RESUME:
 			case OP_YIELD:
@@ -3700,6 +3809,7 @@ static void jit(rela_vm* vm) {
 			case OP_JTRUE:
 			case OP_FOR:
 			case OPP_CFUNC:
+			case OPP_UPDATE:
 				// normal call that may change routine/ip
 				jit_op(vm, i+1, code.op);
 				jit_sync(vm);
