@@ -3459,6 +3459,8 @@ static void decompile(rela_vm* vm, code_t* c) {
 	fflush(stderr);
 }
 
+#ifdef __linux__
+
 static void jit_byte(rela_vm* vm, unsigned char b) {
 	unsigned char *p = vm->jit.code + vm->jit.depth;
 	*p = b;
@@ -3477,13 +3479,66 @@ static void jit_addr(rela_vm* vm, void* a) {
 	vm->jit.depth += 8;
 }
 
-void hi(int i) {
-	fprintf(stderr, "hi %d\n", i);
-	fflush(stderr);
+// r15 = vm
+// r14 = &vm->routine
+// r13 = vm->jit.iptrx
+// r12 = &vm->routine->ip
+
+static void jit_op(rela_vm* vm, int ip, int op) {
+	// set ip
+	// mov dword [r12],n
+	jit_byte(vm, 0x41);
+	jit_byte(vm, 0xc7);
+	jit_byte(vm, 0x04);
+	jit_byte(vm, 0x24);
+	jit_int(vm, ip);
+	// arg1 vm
+	// mov rdi,r15
+	jit_byte(vm, 0x4c);
+	jit_byte(vm, 0x89);
+	jit_byte(vm, 0xff);
+	// call
+	// mov rax,fn
+	jit_byte(vm, 0x48);
+	jit_byte(vm, 0xb8);
+	jit_addr(vm, funcs[op].func);
+	jit_byte(vm, 0xff);
+	// call rax
+	jit_byte(vm, 0xd0);
+}
+
+static void jit_sync(rela_vm* vm) {
+	// fetch routine
+	// mov r9,[r14]
+	jit_byte(vm, 0x4d);
+	jit_byte(vm, 0x8b);
+	jit_byte(vm, 0x0e);
+	// calc ip address
+	// lea r12,[r9+ipoffset]
+	jit_byte(vm, 0x4d);
+	jit_byte(vm, 0x8d);
+	jit_byte(vm, 0xa1);
+	jit_int(vm, offsetof(cor_t, ip));
+	// index iptrx
+	// mov eax,[r12]
+	jit_byte(vm, 0x41);
+	jit_byte(vm, 0x8b);
+	jit_byte(vm, 0x04);
+	jit_byte(vm, 0x24);
+	// shl eax,3
+	jit_byte(vm, 0xc1);
+	jit_byte(vm, 0xe0);
+	jit_byte(vm, 0x03);
+	// add rax,r13
+	jit_byte(vm, 0x4c);
+	jit_byte(vm, 0x01);
+	jit_byte(vm, 0xe8);
+	// jmp [rax]
+	jit_byte(vm, 0xff);
+	jit_byte(vm, 0x20);
 }
 
 static void jit(rela_vm* vm) {
-#ifdef __linux__
 	vm->jit.limit = vm->code.depth * 128;
 
 	vm->jit.code = mmap(0, vm->jit.limit, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -3505,25 +3560,13 @@ static void jit(rela_vm* vm) {
 	jit_byte(vm, 0x41); // push r12
 	jit_byte(vm, 0x54);
 
+	// rsp alignment
 	jit_byte(vm, 0x6a); // push qword 0
 	jit_byte(vm, 0x00);
 
 	jit_byte(vm, 0x48); // mov rbp, rsp
 	jit_byte(vm, 0x89);
 	jit_byte(vm, 0xe5);
-
-//	for (int i = 0, l = vm->jit.depth; i < l; ) {
-//		for (int j = i+8; i < j; i++) {
-//			fprintf(stderr, "%02x ", vm->jit.code[i]);
-//		}
-//		fprintf(stderr, " ");
-//		for (int j = i+8; i < j; i++) {
-//			fprintf(stderr, "%02x ", vm->jit.code[i]);
-//		}
-//		fprintf(stderr, "\n");
-//	}
-//
-//	fprintf(stderr, "%08lx\n", (size_t)hi);
 
 	jit_byte(vm, 0x49); // mov r15,vm
 	jit_byte(vm, 0xbf);
@@ -3535,30 +3578,11 @@ static void jit(rela_vm* vm) {
 	jit_byte(vm, 0xbd);
 	jit_addr(vm, vm->jit.iptrx);
 
-//	jit_byte(vm, 0xeb);
-//	jit_byte(vm, 0x12);
-//
-//	// <debug>
-//	int debug = vm->code.depth;
-//	jit_byte(vm, 0x48);
-//	jit_byte(vm, 0xb8);
-//	jit_addr(vm, hi);
-//	jit_byte(vm, 0xff);
-//	jit_byte(vm, 0xd0);
-//	jit_byte(vm, 0xc3);
-//	// </debug>
+	jit_sync(vm);
 
 	for (int i = 0, l = vm->code.depth; i < l; i++) {
 		vm->jit.iptrx[i] = &vm->jit.code[vm->jit.depth];
 		code_t code = vm->code.cells[i];
-
-//		jit_byte(vm, 0xbf);
-//		jit_int(vm, i);
-//		jit_byte(vm, 0x48);
-//		jit_byte(vm, 0xb8);
-//		jit_addr(vm, hi);
-//		jit_byte(vm, 0xff);
-//		jit_byte(vm, 0xd0);
 
 		switch (code.op) {
 			case OP_STOP:
@@ -3575,6 +3599,18 @@ static void jit(rela_vm* vm) {
 				jit_byte(vm, 0x5b); // pop rbx
 				jit_byte(vm, 0x5d); // pop rbp
 				jit_byte(vm, 0xc3); // ret
+				break;
+
+			case OP_JMP:
+				// indirect address from iptrx
+				// mov rax,[r13+ip]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x85);
+				jit_int(vm, code.item.inum*8);
+				// jmp rax
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xe0);
 				break;
 
 //			case OP_PRINT:
@@ -3647,71 +3683,10 @@ static void jit(rela_vm* vm) {
 //			case OPP_GNAME:
 //			case OPP_ASSIGNP:
 //			case OPP_ASSIGNL:
-			case OPP_MUL_LIT:
-				// fetch routine
-				jit_byte(vm, 0x4d); // mov r12,[r14]
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x26);
-				// lea r8,[r12+stack.cells]
-				jit_byte(vm, 0x4d);
-				jit_byte(vm, 0x8d);
-				jit_byte(vm, 0x84);
-				jit_byte(vm, 0x24);
-				jit_int(vm, offsetof(cor_t, stack.cells));
-				// mov r9,[r12+stack.depth]
-				jit_byte(vm, 0x4d);
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x8c);
-				jit_byte(vm, 0x24);
-				jit_int(vm, offsetof(cor_t, stack.depth));
-				// dec r9
-				jit_byte(vm, 0x49);
-				jit_byte(vm, 0xff);
-				jit_byte(vm, 0xc9);
-				// shl r9,4
-				assert(sizeof(item_t) == 16);
-				jit_byte(vm, 0x49);
-				jit_byte(vm, 0xc1);
-				jit_byte(vm, 0xe1);
-				jit_byte(vm, 0x04);
-				// add r9,r8
-				jit_byte(vm, 0x4d);
-				jit_byte(vm, 0x01);
-				jit_byte(vm, 0xc1);
-				// add r9,offsetinum
-				jit_byte(vm, 0x49);
-				jit_byte(vm, 0x81);
-				jit_byte(vm, 0xc1);
-				jit_int(vm, offsetof(item_t, inum));
-				// mov rax,[r9]
-				jit_byte(vm, 0x49);
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x01);
-				// imul rax,n
-				jit_byte(vm, 0x48);
-				jit_byte(vm, 0x69);
-				jit_byte(vm, 0xc0);
-				jit_int(vm, code.item.inum);
-				// mov [r9],rax
-				jit_byte(vm, 0x49);
-				jit_byte(vm, 0x89);
-				jit_byte(vm, 0x01);
-				break;
-//			case OPP_ADD_LIT:
+//			case OPP_MUL_LIT:
 //			case OPP_COPIES:
-//			case OPP_UPDATE:
 
-			case OP_JMP:
-				// mov rax,[r13+ip]
-				jit_byte(vm, 0x49);
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x85);
-				jit_int(vm, code.item.inum*8);
-				// jmp rax
-				jit_byte(vm, 0xff);
-				jit_byte(vm, 0xe0);
-				break;
-
+			case OPP_UPDATE:
 			case OP_COROUTINE:
 			case OP_RESUME:
 			case OP_YIELD:
@@ -3721,75 +3696,17 @@ static void jit(rela_vm* vm) {
 			case OP_UNLOOP:
 			case OP_BREAK:
 			case OP_CONTINUE:
-//			case OP_JMP:
 			case OP_JFALSE:
 			case OP_JTRUE:
 			case OP_FOR:
 			case OPP_CFUNC:
-				// fetch routine
-				jit_byte(vm, 0x4d); // mov r12,[r14]
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x26);
-				// set ip
-				jit_byte(vm, 0x41); // mov dword [r12+ipoffset],n
-				jit_byte(vm, 0xc7);
-				jit_byte(vm, 0x84);
-				jit_byte(vm, 0x24);
-				jit_int(vm, offsetof(cor_t, ip));
-				jit_int(vm, i+1);
-				// arg1 vm
-				jit_byte(vm, 0x4c); // mov rdi,r15
-				jit_byte(vm, 0x89);
-				jit_byte(vm, 0xff);
-				// call
-				jit_byte(vm, 0x48); // mov rax,fn
-				jit_byte(vm, 0xb8);
-				jit_addr(vm, funcs[code.op].func);
-				jit_byte(vm, 0xff); // call rax
-				jit_byte(vm, 0xd0);
-				// fetch routine
-				jit_byte(vm, 0x4d); // mov r12,[r14]
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x26);
-				// index iptrx
-				jit_byte(vm, 0x41); // mov eax,[r12+ipoffset]
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x84);
-				jit_byte(vm, 0x24);
-				jit_int(vm, offsetof(cor_t, ip));
-				jit_byte(vm, 0xc1); // shl eax,3
-				jit_byte(vm, 0xe0);
-				jit_byte(vm, 0x03);
-				jit_byte(vm, 0x4c); // add rax,r13
-				jit_byte(vm, 0x01);
-				jit_byte(vm, 0xe8);
-				// jmp ip
-				jit_byte(vm, 0xff); // jmp [rax]
-				jit_byte(vm, 0x20);
+				// normal call that may change routine/ip
+				jit_op(vm, i+1, code.op);
+				jit_sync(vm);
 				break;
 
 			default:
-				// fetch routine
-				jit_byte(vm, 0x4d); // mov r12,[r14]
-				jit_byte(vm, 0x8b);
-				jit_byte(vm, 0x26);
-				// set ip
-				jit_byte(vm, 0x41); // mov dword [r12+ipoffset],n
-				jit_byte(vm, 0xc7);
-				jit_byte(vm, 0x84);
-				jit_byte(vm, 0x24);
-				jit_int(vm, offsetof(cor_t, ip));
-				jit_int(vm, i+1);
-				// arg1 vm
-				jit_byte(vm, 0x4c); // mov rsi,r15
-				jit_byte(vm, 0x89);
-				jit_byte(vm, 0xff);
-				// call
-				jit_byte(vm, 0x48); // mov qword rax,fn
-				jit_byte(vm, 0xb8);
-				jit_addr(vm, funcs[code.op].func);
-				jit_byte(vm, 0xff); // call rax
-				jit_byte(vm, 0xd0);
+				jit_op(vm, i+1, code.op);
 				break;
 		}
 	}
@@ -3811,8 +3728,8 @@ static void jit(rela_vm* vm) {
 	fprintf(stderr, "code %u jit %u %u\n", vm->code.depth, vm->jit.depth, vm->jit.limit);
 
 	ensure(vm, 0 == mprotect(vm->jit.code, vm->jit.limit, PROT_READ | PROT_EXEC), "mprotect %d", errno);
-#endif
 }
+#endif
 
 #ifdef TRACE
 // tick() tracing tmptext() may call meta-methods
@@ -4021,7 +3938,10 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 		if (code->op == OPP_CFUNC) code->cache = vm->cache.cfuncs++;
 	}
 
-	jit(vm);
+	#ifdef __linux__
+		jit(vm);
+	#endif
+
 	gc(vm);
 	return vm;
 }
