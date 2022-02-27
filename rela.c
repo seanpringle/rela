@@ -44,18 +44,19 @@
 
 enum opcode_t {
 	// <order-important>
-	OP_STOP=0, OP_JMP, OP_FOR, OP_PID, OP_LIT, OP_MARK, OP_LIMIT, OP_CLEAN, OP_RETURN,
-	OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT, OPP_GNAME,
-	OPP_COPIES, OPP_UPDATE,
+	OP_STOP=0, OP_JMP, OP_FOR2, OP_PID, OP_LIT, OP_MARK, OP_LIMIT, OP_CLEAN, OP_RETURN,
+	OP_LSET, OP_LGET, OPP_LCALL, OPP_FNAME, OPP_CFUNC, OPP_ASSIGNL, OPP_ASSIGNP, OPP_MUL_LIT, OPP_ADD_LIT,
+	OPP_GNAME, OPP_COPIES, OPP_UPDATE,
 	// </order-important>
+	OP_FOR1,
 	OP_PRINT, OP_COROUTINE, OP_RESUME, OP_YIELD, OP_CALL, OP_GLOBAL, OP_MAP, OP_VECTOR, OP_VPUSH,
 	OP_META_SET, OP_META_GET, OP_UNMAP, OP_LOOP, OP_UNLOOP, OP_BREAK, OP_CONTINUE, OP_JFALSE,
 	OP_JTRUE, OP_NIL, OP_COPY, OP_SHUNT, OP_SHIFT, OP_TRUE, OP_FALSE, OP_ASSIGN, OP_AND, OP_OR,
-	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV, OP_MOD, OP_NOT,
-	OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT, OP_ASSERT, OP_GC,
-	OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH, OP_CEIL, OP_FLOOR,
-	OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE, OP_UNPACK,
-	OPERATIONS
+	OP_FIND, OP_SET, OP_GET, OP_COUNT, OP_DROP, OP_ADD, OP_NEG, OP_SUB, OP_MUL, OP_DIV,
+	OP_MOD, OP_NOT, OP_EQ, OP_NE, OP_LT, OP_GT, OP_LTE, OP_GTE, OP_CONCAT, OP_MATCH, OP_SORT,
+	OP_ASSERT, OP_GC, OP_SIN, OP_COS, OP_TAN, OP_ASIN, OP_ACOS, OP_ATAN, OP_SINH, OP_COSH, OP_TANH,
+	OP_CEIL, OP_FLOOR, OP_SQRT, OP_ABS, OP_ATAN2, OP_LOG, OP_LOG10, OP_POW, OP_MIN, OP_MAX, OP_TYPE,
+	OP_UNPACK, OPERATIONS
 };
 
 enum type_t {
@@ -176,7 +177,6 @@ typedef struct _cor_t {
 
 typedef struct{
 	enum opcode_t op;
-	int cache;
 	item_t item;
 } code_t; // compiled "bytecode"
 
@@ -292,11 +292,6 @@ typedef struct _rela_vm {
 		int depth;
 		int start;
 	} code;
-
-	struct {
-		item_t* cfunc;
-		int cfuncs;
-	} cache;
 
 	struct {
 		vec_t entries;
@@ -861,8 +856,6 @@ static void reset(rela_vm* vm) {
 	vm->scope_global = NULL;
 	vm->routines.count = 0;
 	vm->routine = NULL;
-	free(vm->cache.cfunc);
-	vm->cache.cfunc = NULL;
 	gc(vm);
 }
 
@@ -1186,6 +1179,12 @@ static int compile(rela_vm* vm, int op, item_t item) {
 		// fname,call -> cfunc
 		if (op == OP_CALL && back1->op == OPP_FNAME) {
 			back1->op = OPP_CFUNC;
+			return vm->code.depth-1;
+		}
+
+		// lget,call -> lcall
+		if (op == OP_CALL && back1->op == OP_LGET) {
+			back1->op = OPP_LCALL;
 			return vm->code.depth-1;
 		}
 
@@ -1945,7 +1944,45 @@ static int parse(rela_vm* vm, const char *source, int results, int mode) {
 	return offset;
 }
 
-static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) {
+static int scope_find(rela_vm* vm, node_t* scope, item_t var) {
+	if (scope) for (int i = 0, l = vec_size(vm, scope->keys); i < l; i++) {
+		node_t* key = vec_get(vm, scope->keys, i).node;
+		if (equal(vm, key->item, var)) return i;
+	}
+	return -1;
+}
+
+static int compile_assign(rela_vm* vm, node_t* scope, node_t* node, int index) {
+	int local = scope_find(vm, scope, node->item);
+	bool exists = local >= 0;
+	bool self = exists && node == vec_get(vm, scope->keys, local).node;
+	if (scope && exists && !self) {
+		assert(index == 0);
+		compile(vm, OP_LSET, integer(vm, local));
+	}
+	else {
+		if (scope && !exists) {
+			local = vec_size(vm, scope->keys);
+			vec_push_allot(vm, &scope->keys, (item_t){.type = NODE, .node = node});
+		}
+		compile(vm, OP_LIT, node->item);
+		compile(vm, OP_ASSIGN, integer(vm, index));
+	}
+	return local;
+}
+
+static void compile_lookup(rela_vm* vm, node_t* scope, node_t* node) {
+	int local = scope_find(vm, scope, node->item);
+	if (local >= 0) {
+		compile(vm, OP_LGET, integer(vm, local));
+	}
+	else {
+		compile(vm, OP_LIT, node->item);
+		compile(vm, OP_FIND, nil(vm));
+	}
+}
+
+static void process(rela_vm* vm, node_t* scope, node_t *node, int flags, int index, int limit) {
 	int flag_assign = flags & PROCESS_ASSIGN ? 1:0;
 
 	// if we're assigning with chained expressions, only OP_SET|OP_ASSIGN the last one
@@ -1965,12 +2002,12 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 
 		// stream the values onto the substack
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
+			process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, -1);
 
 		// OP_SET|OP_ASSIGN index values from the start of the current substack frame
 		for (int i = 0; i < vec_size(vm, node->keys); i++) {
 			node_t* subnode = vec_get(vm, node->keys, i).node;
-			process(vm, subnode, PROCESS_ASSIGN, i, -1);
+			process(vm, scope, subnode, PROCESS_ASSIGN, i, -1);
 		}
 
 		// end substack frame
@@ -1989,7 +2026,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 			if (node->index) {
 				compile(vm, OP_MARK, nil(vm));
 					if (node->args)
-						process(vm, node->args, 0, 0, -1);
+						process(vm, scope, node->args, 0, 0, -1);
 					compile(vm, OP_LIT, node->item);
 					compile(vm, OP_FIND, nil(vm));
 					compile(vm, OP_CALL, nil(vm));
@@ -2007,7 +2044,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 				compile(vm, OP_MARK, nil(vm));
 					compile(vm, OP_SHIFT, nil(vm));
 					if (node->args)
-						process(vm, node->args, 0, 0, -1);
+						process(vm, scope, node->args, 0, 0, -1);
 					compile(vm, OP_SHIFT, nil(vm));
 					compile(vm, OP_CALL, nil(vm));
 				compile(vm, OP_LIMIT, integer(vm, limit));
@@ -2020,7 +2057,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 				compile(vm, OP_SHUNT, nil(vm));
 				compile(vm, OP_MARK, nil(vm));
 					if (node->args)
-						process(vm, node->args, 0, 0, -1);
+						process(vm, scope, node->args, 0, 0, -1);
 					compile(vm, OP_SHIFT, nil(vm));
 					compile(vm, OP_CALL, nil(vm));
 				compile(vm, OP_LIMIT, integer(vm, limit));
@@ -2030,49 +2067,50 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 			if (!node->index && !node->field) {
 				compile(vm, OP_MARK, nil(vm));
 					if (node->args)
-						process(vm, node->args, 0, 0, -1);
-					compile(vm, OP_LIT, node->item);
-					compile(vm, OP_FIND, nil(vm));
+						process(vm, scope, node->args, 0, 0, -1);
+					compile_lookup(vm, scope, node);
 					compile(vm, OP_CALL, nil(vm));
 				compile(vm, OP_LIMIT, integer(vm, limit));
 			}
 		}
 		// variable reference
 		else {
-			compile(vm, OP_LIT, node->item);
-
 			if (assigning) {
 				if (node->index) {
+					compile(vm, OP_LIT, node->item);
 					compile(vm, OP_FIND, nil(vm));
 					compile(vm, OP_SET, nil(vm));
 				}
 
 				if (node->field) {
+					compile(vm, OP_LIT, node->item);
 					compile(vm, OP_SET, nil(vm));
 				}
 
 				if (!node->index && !node->field) {
-					compile(vm, OP_ASSIGN, integer(vm, index));
+					compile_assign(vm, scope, node, index);
 				}
 			}
 			else {
 				if (node->index) {
+					compile(vm, OP_LIT, node->item);
 					compile(vm, OP_FIND, nil(vm));
 					compile(vm, OP_GET, nil(vm));
 				}
 
 				if (node->field) {
+					compile(vm, OP_LIT, node->item);
 					compile(vm, OP_GET, nil(vm));
 				}
 
 				if (!node->index && !node->field) {
-					compile(vm, OP_FIND, nil(vm));
+					compile_lookup(vm, scope, node);
 				}
 			}
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
+			process(vm, scope, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 	}
 	else
@@ -2084,8 +2122,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		int entry = compile(vm, OP_LIT, nil(vm));
 
 		if (node->item.type) {
-			compile(vm, OP_LIT, node->item);
-			compile(vm, OP_ASSIGN, integer(vm, 0));
+			compile_assign(vm, scope, node, 0);
 		}
 
 		int jump = compile(vm, OP_JMP, nil(vm));
@@ -2096,13 +2133,15 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 			compile(vm, OP_PID, integer(vm, node->fpath.ids[i]));
 		}
 
-		for (int i = 0; i < vec_size(vm, node->keys); i++)
-			process(vm, vec_get(vm, node->keys, i).node, PROCESS_ASSIGN, i, -1);
+		for (int i = 0, l = vec_size(vm, node->keys); i < l; i++) {
+			process(vm, node, vec_get(vm, node->keys, i).node, PROCESS_ASSIGN, i, -1);
+		}
 
 		compile(vm, OP_CLEAN, nil(vm));
 
-		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
+		for (int i = 0, l = vec_size(vm, node->vals); i < l; i++) {
+			process(vm, node, vec_get(vm, node->vals, i).node, 0, 0, 0);
+		}
 
 		// if an explicit return expression is used, these instructions
 		// will be dead code
@@ -2118,7 +2157,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 			compile(vm, OP_SHUNT, nil(vm));
 			compile(vm, OP_MARK, nil(vm));
 				if (node->args)
-					process(vm, node->args, 0, 0, -1);
+					process(vm, scope, node->args, 0, 0, -1);
 				compile(vm, OP_SHIFT, nil(vm));
 				compile(vm, OP_CALL, nil(vm));
 			compile(vm, OP_LIMIT, integer(vm, limit));
@@ -2130,10 +2169,10 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		compile(vm, OP_SHUNT, nil(vm));
 		compile(vm, OP_MARK, nil(vm));
 			if (node->args)
-				process(vm, node->args, 0, 0, -1);
+				process(vm, scope, node->args, 0, 0, -1);
 			compile(vm, OP_SHIFT, nil(vm));
 			for (int i = 0; i < vec_size(vm, node->vals); i++)
-				process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
+				process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, -1);
 			compile(vm, OP_CALL, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, limit));
 
@@ -2142,7 +2181,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
+			process(vm, scope, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 	}
 	// inline opcode
@@ -2151,10 +2190,10 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		assert(node->opcode != OP_CALL);
 
 		if (node->args)
-			process(vm, node->args, 0, 0, -1);
+			process(vm, scope, node->args, 0, 0, -1);
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
+			process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, -1);
 
 		compile(vm, node->opcode, nil(vm));
 
@@ -2163,31 +2202,31 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
+			process(vm, scope, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 	}
 	else
 	if (node->type == NODE_OPERATOR && node->opcode == OP_AND) {
 		assert(vec_size(vm, node->vals) == 2);
-		process(vm, vec_get(vm, node->vals, 0).node, 0, 0, 1);
+		process(vm, scope, vec_get(vm, node->vals, 0).node, 0, 0, 1);
 		int jump = compile(vm, OP_JFALSE, nil(vm));
 		compile(vm, OP_DROP, nil(vm));
-		process(vm, vec_get(vm, node->vals, 1).node, 0, 0, 1);
+		process(vm, scope, vec_get(vm, node->vals, 1).node, 0, 0, 1);
 		compiled(vm, jump)->item = integer(vm, vm->code.depth);
 	}
 	else
 	if (node->type == NODE_OPERATOR && node->opcode == OP_OR) {
 		assert(vec_size(vm, node->vals) == 2);
-		process(vm, vec_get(vm, node->vals, 0).node, 0, 0, 1);
+		process(vm, scope, vec_get(vm, node->vals, 0).node, 0, 0, 1);
 		int jump = compile(vm, OP_JTRUE, nil(vm));
 		compile(vm, OP_DROP, nil(vm));
-		process(vm, vec_get(vm, node->vals, 1).node, 0, 0, 1);
+		process(vm, scope, vec_get(vm, node->vals, 1).node, 0, 0, 1);
 		compiled(vm, jump)->item = integer(vm, vm->code.depth);
 	}
 	else
 	if (node->type == NODE_OPERATOR) {
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 1);
+			process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, 1);
 
 		compile(vm, node->opcode, nil(vm));
 
@@ -2196,7 +2235,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
+			process(vm, scope, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 	}
 	else
@@ -2243,7 +2282,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 				if (length) {
 					const char *sub = substr(vm, start, 0, length);
 					ensure(vm, length == parse(vm, sub, RESULTS_FIRST, PARSE_COMMA|PARSE_ANDOR), "string interpolation parsing failed");
-					process(vm, pop(vm).node, 0, 0, -1);
+					process(vm, scope, pop(vm).node, 0, 0, -1);
 					if (started) compile(vm, OP_CONCAT, nil(vm));
 					started = true;
 				}
@@ -2264,7 +2303,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		}
 
 		if (node->chain) {
-			process(vm, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
+			process(vm, scope, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 
 		ensure(vm, !assigning || node->item.type == STRING, "cannot assign %s",
@@ -2282,7 +2321,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 
 		// conditions
 		if (node->args)
-			process(vm, node->args, 0, 0, -1);
+			process(vm, scope, node->args, 0, 0, -1);
 
 		// if false, jump to else/end
 		int jump = compile(vm, OP_JFALSE, nil(vm));
@@ -2290,7 +2329,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 
 		// success block
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
+			process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		// optional failure block
 		if (vec_size(vm, node->keys)) {
@@ -2301,7 +2340,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 
 			// failure block
 			for (int i = 0; i < vec_size(vm, node->keys); i++)
-				process(vm, vec_get(vm, node->keys, i).node, 0, 0, 0);
+				process(vm, scope, vec_get(vm, node->keys, i).node, 0, 0, 0);
 
 			compiled(vm, jump2)->item = integer(vm, vm->code.depth);
 		}
@@ -2322,7 +2361,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 
 		// condition(s)
 		if (node->args)
-			process(vm, node->args, 0, 0, -1);
+			process(vm, scope, node->args, 0, 0, -1);
 
 		// if false, jump to end
 		int iter = compile(vm, OP_JFALSE, nil(vm));
@@ -2330,7 +2369,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 
 		// do ... end
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
+			process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
@@ -2348,19 +2387,36 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 
 		// the iterable
 		if (node->args)
-			process(vm, node->args, 0, 0, -1);
+			process(vm, scope, node->args, 0, 0, -1);
 
 		int loop = compile(vm, OP_LOOP, nil(vm));
 
 		int begin = vm->code.depth;
 
-		// OP_FOR expects a vector with key[,val] variable names
+		// OP_FOR1 expects a vector with key[,val] variable names
 		if (!node->keys) node->keys = vec_allot(vm);
-		compile(vm, OP_FOR, (item_t){.type = VECTOR, .vec = node->keys});
+
+		if (scope) {
+			vec_t* locals = vec_allot(vm);
+			compile(vm, OP_MARK, nil(vm));
+			compile(vm, OP_LIT, integer(vm, 0));
+			for (int i = 0, l = vec_size(vm, node->keys); i < l; i++) {
+				node_t* key = node_allot(vm);
+				key->item = vec_get(vm, node->keys, i);
+				int local = compile_assign(vm, scope, key, 0);
+				vec_push(vm, locals, integer(vm, local));
+			}
+			compile(vm, OP_LIMIT, integer(vm, 0));
+			begin = vm->code.depth;
+			compile(vm, OP_FOR2, (item_t){.type = VECTOR, .vec = locals});
+		}
+		else {
+			compile(vm, OP_FOR1, (item_t){.type = VECTOR, .vec = node->keys});
+		}
 
 		// block
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
+			process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		// clean up
 		compile(vm, OP_JMP, integer(vm, begin));
@@ -2376,7 +2432,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		compile(vm, OP_CLEAN, nil(vm));
 
 		if (node->args)
-			process(vm, node->args, 0, 0, -1);
+			process(vm, scope, node->args, 0, 0, -1);
 
 		compile(vm, OP_RETURN, nil(vm));
 
@@ -2390,7 +2446,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		compile(vm, OP_MARK, nil(vm));
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++) {
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, -1);
+			process(vm, scope, vec_get(vm, node->vals, i).node, 0, 0, -1);
 			compile(vm, OP_VPUSH, nil(vm));
 		}
 
@@ -2405,7 +2461,7 @@ static void process(rela_vm* vm, node_t *node, int flags, int index, int limit) 
 		assert(!node->args);
 
 		for (int i = 0; i < vec_size(vm, node->vals); i++)
-			process(vm, vec_get(vm, node->vals, i).node, 0, 0, 0);
+			process(vm, NULL, vec_get(vm, node->vals, i).node, 0, 0, 0);
 
 		compile(vm, OP_UNMAP, nil(vm));
 		compile(vm, OP_LIMIT, integer(vm, 1));
@@ -2420,7 +2476,7 @@ static void source(rela_vm* vm, const char *source) {
 
 	while (source[offset]) {
 		offset += parse(vm, &source[offset], RESULTS_DISCARD, PARSE_COMMA|PARSE_ANDOR);
-		process(vm, pop(vm).node, 0, 0, -1);
+		process(vm, NULL, pop(vm).node, 0, 0, -1);
 	}
 
 	ensure(vm, !depth(vm), "parse unbalanced");
@@ -2433,10 +2489,6 @@ static item_t literal(rela_vm* vm) {
 static int64_t literal_int(rela_vm* vm) {
 	item_t lit = literal(vm);
 	return lit.type == INTEGER ? lit.inum: 0;
-}
-
-static int* cache_slot(rela_vm* vm) {
-	return &vm->code.cells[vm->routine->ip-1].cache;
 }
 
 static void op_stop (rela_vm* vm) {
@@ -2789,6 +2841,31 @@ static item_t* local(rela_vm* vm, const char* key) {
 	return NULL;
 }
 
+static void op_lget(rela_vm* vm) {
+	cor_t* cor = vm->routine;
+	assert(cor->frames.depth);
+	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+	push(vm, frame->locals.vals[literal_int(vm)]);
+}
+
+static void op_lcall(rela_vm* vm) {
+	cor_t* cor = vm->routine;
+	assert(cor->frames.depth);
+	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+	call(vm, frame->locals.vals[literal_int(vm)]);
+}
+
+static void lset(rela_vm* vm, int index, item_t val) {
+	cor_t* cor = vm->routine;
+	assert(cor->frames.depth);
+	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+	frame->locals.vals[index] = val;
+}
+
+static void op_lset(rela_vm* vm) {
+	lset(vm, literal_int(vm), pop(vm));
+}
+
 // locate a local variable in-scope in an outer frame
 static item_t* uplocal(rela_vm* vm, const char* key) {
 	cor_t* cor = vm->routine;
@@ -2876,7 +2953,7 @@ static void op_find(rela_vm* vm) {
 	push(vm, *val);
 }
 
-static void op_for(rela_vm* vm) {
+static void op_for1(rela_vm* vm) {
 	assert(literal(vm).type == VECTOR);
 
 	int var = 0;
@@ -2892,7 +2969,6 @@ static void op_for(rela_vm* vm) {
 		else {
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
-
 			if (vec_size(vm, vars) > 0)
 				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
 		}
@@ -2905,7 +2981,6 @@ static void op_for(rela_vm* vm) {
 		else {
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), integer(vm, step));
-
 			if (vec_size(vm, vars) > 0)
 				assign(vm, vec_get(vm, vars, var++), vec_get(vm, iter.vec, step));
 		}
@@ -2918,7 +2993,6 @@ static void op_for(rela_vm* vm) {
 		else {
 			if (vec_size(vm, vars) > 1)
 				assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->keys, step));
-
 			if (vec_size(vm, vars) > 0)
 				assign(vm, vec_get(vm, vars, var++), vec_get(vm, &iter.map->vals, step));
 		}
@@ -2957,6 +3031,95 @@ static void op_for(rela_vm* vm) {
 				assign(vm, vec_get(vm, vars, var++), depth(vm) > idx ? *item(vm, idx++): nil(vm));
 			if (vec_size(vm, vars) > 0)
 				assign(vm, vec_get(vm, vars, var++), depth(vm) > idx ? *item(vm, idx++): nil(vm));
+		}
+
+		limit(vm, 0);
+	}
+	else {
+		vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-1];
+	}
+
+	vm->routine->loops.cells[vm->routine->loops.depth-1] = step+1;
+}
+
+static void op_for2(rela_vm* vm) {
+	assert(literal(vm).type == VECTOR);
+
+	int var = 0;
+	vec_t* vars = literal(vm).vec;
+
+	item_t iter = top(vm);
+	int step = vm->routine->loops.cells[vm->routine->loops.depth-1];
+
+	if (iter.type == INTEGER) {
+		if (step == iter.inum) {
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+		}
+		else {
+			if (vec_size(vm, vars) > 1)
+				lset(vm, vec_get(vm, vars, var++).inum, integer(vm, step));
+			if (vec_size(vm, vars) > 0)
+				lset(vm, vec_get(vm, vars, var++).inum, integer(vm, step));
+		}
+	}
+	else
+	if (iter.type == VECTOR) {
+		if (step >= vec_size(vm, iter.vec)) {
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+		}
+		else {
+			if (vec_size(vm, vars) > 1)
+				lset(vm, vec_get(vm, vars, var++).inum, integer(vm, step));
+			if (vec_size(vm, vars) > 0)
+				lset(vm, vec_get(vm, vars, var++).inum, vec_get(vm, iter.vec, step));
+		}
+	}
+	else
+	if (iter.type == MAP) {
+		if (step >= vec_size(vm, &iter.map->keys)) {
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+		}
+		else {
+			if (vec_size(vm, vars) > 1)
+				lset(vm, vec_get(vm, vars, var++).inum, vec_get(vm, &iter.map->keys, step));
+			if (vec_size(vm, vars) > 0)
+				lset(vm, vec_get(vm, vars, var++).inum, vec_get(vm, &iter.map->vals, step));
+		}
+	}
+	else
+	if (iter.type == SUBROUTINE || iter.type == CALLBACK) {
+		item_t argv[1] = {integer(vm, step)};
+		item_t retv[2] = {nil(vm), nil(vm)};
+		method(vm, iter, 1, argv, 2, retv);
+
+		if (retv[0].type == NIL) {
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+		}
+		else {
+			int idx = 0;
+			if (vec_size(vm, vars) > 1)
+				lset(vm, vec_get(vm, vars, var++).inum, retv[idx++]);
+			if (vec_size(vm, vars) > 0)
+				lset(vm, vec_get(vm, vars, var++).inum, retv[idx++]);
+		}
+	}
+	else
+	if (iter.type == COROUTINE) {
+		op_mark(vm);
+		push(vm, iter);
+		push(vm, integer(vm, step));
+		op_resume(vm);
+		while (vm->routine == iter.cor && tick(vm));
+
+		if (!depth(vm) || item(vm, 0)->type == NIL) {
+			vm->routine->ip = vm->routine->loops.cells[vm->routine->loops.depth-2];
+		}
+		else {
+			int idx = 0;
+			if (vec_size(vm, vars) > 1)
+				lset(vm, vec_get(vm, vars, var++).inum, depth(vm) > idx ? *item(vm, idx++): nil(vm));
+			if (vec_size(vm, vars) > 0)
+				lset(vm, vec_get(vm, vars, var++).inum, depth(vm) > idx ? *item(vm, idx++): nil(vm));
 		}
 
 		limit(vm, 0);
@@ -3294,19 +3457,13 @@ static void op_gname(rela_vm* vm) {
 }
 
 static void op_cfunc(rela_vm* vm) {
-	item_t* cache = &vm->cache.cfunc[*cache_slot(vm)];
-	if (cache->type == SUBROUTINE || cache->type == CALLBACK) {
-		call(vm, *cache);
-		return;
-	}
 	item_t key = literal(vm);
 	item_t* val = find(vm, key);
 
 	char tmp[STRTMP];
 	ensure(vm, val, "unknown name: %s", tmptext(vm, key, tmp, sizeof(tmp)));
 
-	*cache = *val;
-	call(vm, *cache);
+	call(vm, *val);
 }
 
 // compression of mark,lit,lit,assign,limit0
@@ -3317,7 +3474,7 @@ static void op_assignp(rela_vm* vm) {
 // lit,assign0
 static void op_assignl(rela_vm* vm) {
 	// indexed from the base of the current subframe
-	assign(vm, literal(vm), depth(vm) ? *item(vm, 0): nil(vm));
+	assign(vm, literal(vm), *item(vm, 0));
 }
 
 // dups
@@ -3369,7 +3526,8 @@ func_t funcs[OPERATIONS] = {
 	[OP_JMP]       = { .name = "jmp",       .lib = false, .func = op_jmp       },
 	[OP_JFALSE]    = { .name = "jfalse",    .lib = false, .func = op_jfalse    },
 	[OP_JTRUE]     = { .name = "jtrue",     .lib = false, .func = op_jtrue     },
-	[OP_FOR]       = { .name = "for",       .lib = false, .func = op_for       },
+	[OP_FOR1]      = { .name = "for1",       .lib = false, .func = op_for1       },
+	[OP_FOR2]      = { .name = "for2",       .lib = false, .func = op_for2       },
 	[OP_NIL]       = { .name = "nil",       .lib = false, .func = op_nil       },
 	[OP_COPY]      = { .name = "copy",      .lib = false, .func = op_copy      },
 	[OP_SHUNT]     = { .name = "shunt",     .lib = false, .func = op_shunt     },
@@ -3379,6 +3537,9 @@ func_t funcs[OPERATIONS] = {
 	[OP_LIT]       = { .name = "lit",       .lib = false, .func = op_lit       },
 	[OP_ASSIGN]    = { .name = "assign",    .lib = false, .func = op_assign    },
 	[OP_FIND]      = { .name = "find",      .lib = false, .func = op_find      },
+	[OP_LSET]      = { .name = "lset",      .lib = false, .func = op_lset      },
+	[OP_LGET]      = { .name = "lget",      .lib = false, .func = op_lget      },
+	[OPP_LCALL]     = { .name = "lcall",     .lib = false, .func = op_lcall     },
 	[OP_SET]       = { .name = "set",       .lib = false, .func = op_set       },
 	[OP_GET]       = { .name = "get",       .lib = false, .func = op_get       },
 	[OP_COUNT]     = { .name = "count",     .lib = false, .func = op_count     },
@@ -3441,7 +3602,7 @@ func_t funcs[OPERATIONS] = {
 static void decompile(rela_vm* vm, code_t* c) {
 	char tmp[STRTMP];
 	const char *str = tmptext(vm, c->item, tmp, sizeof(tmp));
-	fprintf(stderr, "%04ld  %3d  %-10s  %s\n", c - vm->code.cells, c->cache, funcs[c->op].name, str);
+	fprintf(stderr, "%04ld  %-10s  %s\n", c - vm->code.cells, funcs[c->op].name, str);
 	fflush(stderr);
 }
 
@@ -3551,11 +3712,6 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 	memmove(&vm->stringsB, &vm->stringsA, sizeof(string_region_t));
 	memset(&vm->stringsA, 0, sizeof(string_region_t));
 
-	for (int i = 0, l = vm->code.depth; i < l; i++) {
-		code_t* code = &vm->code.cells[i];
-		if (code->op == OPP_CFUNC) code->cache = vm->cache.cfuncs++;
-	}
-
 	gc(vm);
 	return vm;
 }
@@ -3568,73 +3724,46 @@ int rela_run(rela_vm* vm) {
 	return rela_run_ex(vm, 1, (int[]){0});
 }
 
-#ifdef TRACE
-// tick() tracing tmptext() may call meta-methods
-// with tick() recursion. only output the trace at
-// the top level.
-bool tracing;
-#endif
-
 static bool tick(rela_vm* vm) {
 	int ip = vm->routine->ip++;
 	assert(ip >= 0 && ip < vm->code.depth);
 	int opcode = vm->code.cells[ip].op;
-
-	#ifdef TRACE
-		if (!tracing) {
-			tracing = true;
-			code_t* c = &vm->code.cells[ip];
-			char tmpA[STRTMP];
-			const char *str = tmptext(vm, c->item, tmpA, sizeof(tmpA));
-			for (int i = 0, l = vm->routine->marks.depth; i < l; i++)
-				fprintf(stderr, "  ");
-			fprintf(stderr, "%04ld  %-10s  %-10s", c - vm->code.cells, funcs[c->op].name, str);
-			fflush(stderr);
-			tracing = false;
-		}
-	#endif
-
-	switch (opcode) {
-		// <order-important>
-		case OP_STOP: { return false; break; }
-		case OP_JMP: { op_jmp(vm); break; }
-		case OP_FOR: { op_for(vm); break; }
-		case OP_PID: { op_pid(vm); break; }
-		case OP_LIT: { op_lit(vm); break; }
-		case OP_MARK: { op_mark(vm); break; }
-		case OP_LIMIT: { op_limit(vm); break; }
-		case OP_CLEAN: { op_clean(vm); break; }
-		case OP_RETURN: { op_return(vm); break; }
-		case OPP_FNAME: { op_fname(vm); break; }
-		case OPP_CFUNC: { op_cfunc(vm); break; }
-		case OPP_ASSIGNL: { op_assignl(vm); break; }
-		case OPP_ASSIGNP: { op_assignp(vm); break; }
-		case OPP_MUL_LIT: { op_mul_lit(vm); break; }
-		case OPP_ADD_LIT: { op_add_lit(vm); break; }
-		// </order-important>
-		default: funcs[opcode].func(vm); break;
-	}
-
-	#ifdef TRACE
-		if (!tracing) {
-			tracing = true;
-			fprintf(stderr, "[");
-			for (int i = 0, l = vm->routine->stack.depth; i < l; i++) {
-				if (i == l-depth(vm))
-					fprintf(stderr, "|");
-				char tmpB[STRTMP];
-				fprintf(stderr, "%s%s",
-					tmptext(vm, *stack_cell(vm, i), tmpB, sizeof(tmpB)),
-					(i < l-1 ? ", ":"")
-				);
-			}
-			fprintf(stderr, "]\n");
-			fflush(stderr);
-			tracing = false;
-		}
-	#endif
-
+	if (opcode == OP_STOP) return false;
+	funcs[opcode].func(vm);
 	return true;
+}
+
+static void tick_all(rela_vm* vm) {
+	for (;;) {
+		int ip = vm->routine->ip++;
+		assert(ip >= 0 && ip < vm->code.depth);
+		int opcode = vm->code.cells[ip].op;
+
+		switch (opcode) {
+			// <order-important>
+			case OP_STOP: { return; break; }
+			case OP_JMP: { op_jmp(vm); break; }
+			case OP_FOR2: { op_for2(vm); break; }
+			case OP_PID: { op_pid(vm); break; }
+			case OP_LIT: { op_lit(vm); break; }
+			case OP_MARK: { op_mark(vm); break; }
+			case OP_LIMIT: { op_limit(vm); break; }
+			case OP_CLEAN: { op_clean(vm); break; }
+			case OP_RETURN: { op_return(vm); break; }
+			case OP_LSET: { op_lset(vm); break; }
+			case OP_LGET: { op_lget(vm); break; }
+			case OPP_LCALL: { op_lcall(vm); break; }
+			case OPP_FNAME: { op_fname(vm); break; }
+			case OPP_CFUNC: { op_cfunc(vm); break; }
+			case OPP_ASSIGNL: { op_assignl(vm); break; }
+			case OPP_ASSIGNP: { op_assignp(vm); break; }
+			case OPP_MUL_LIT: { op_mul_lit(vm); break; }
+			case OPP_ADD_LIT: { op_add_lit(vm); break; }
+			// </order-important>
+			case OP_ADD: { op_add(vm); break; }
+			default: funcs[opcode].func(vm); break;
+		}
+	}
 }
 
 static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, item_t* retv) {
@@ -3665,9 +3794,6 @@ static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, i
 }
 
 int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
-	vm->cache.cfunc = calloc(vm->cache.cfuncs, sizeof(item_t));
-	ensure(vm, vm->cache.cfunc, "oom");
-
 	int wtf = setjmp(vm->jmp);
 	if (wtf) {
 		fprintf(stderr, "%s (", vm->err);
@@ -3684,7 +3810,7 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	for (int mod = 0; mod < modules; mod++) {
 		ensure(vm, modlist[mod] < vec_size(vm, &vm->modules.entries), "invalid module %d", modlist[mod]);
 		vm->routine->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
-		while (tick(vm));
+		tick_all(vm);
 	}
 	reset(vm);
 	return 0;
