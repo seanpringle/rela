@@ -1,0 +1,11 @@
+
+function()
+	function test(n)
+		return n*2
+	end
+	n = 0
+	for i in 100000000
+		n = n + test(i)
+	end
+	print(n)
+end()

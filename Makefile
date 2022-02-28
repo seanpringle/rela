@@ -1,6 +1,6 @@
 
 dev: LFLAGS=-lm -lpcre
-dev: CFLAGS=-Wall -Werror -Og -g -std=c11 -DPCRE
+dev: CFLAGS=-Wall -Werror -O0 -g -std=c11 -DPCRE
 dev: rela.o cli.o
 	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
 
@@ -11,7 +11,7 @@ rel: rela.o cli.o
 	ar rcs librela.a rela.o
 
 prof: rel
-	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 CPUPROFILE=/tmp/rela.prof ./rela bench.rela
+	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 CPUPROFILE=/tmp/rela.prof ./rela test.rela
 	google-pprof --web ./rela /tmp/rela.prof
 
 %.o: %.c *.h

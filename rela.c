@@ -20,6 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#define _GNU_SOURCE
 #include "rela.h"
 
 #include <stdlib.h>
@@ -33,6 +34,7 @@
 #include <float.h>
 #include <assert.h>
 #include <setjmp.h>
+#include <stddef.h>
 
 #ifndef NDEBUG
 #include <signal.h>
@@ -40,6 +42,11 @@
 
 #ifdef PCRE
 #include <pcre.h>
+#endif
+
+#ifdef __linux__
+#include <sys/mman.h>
+#include <errno.h>
 #endif
 
 enum opcode_t {
@@ -312,6 +319,16 @@ typedef struct _rela_vm {
 	jmp_buf jmp;
 	char err[STRTMP];
 	void* custom;
+
+#ifdef __linux__
+	struct {
+		void** iptrx;
+		unsigned char* code;
+		int depth;
+		int limit;
+	} jit;
+#endif
+
 } rela_vm;
 
 typedef int (*strcb)(int);
@@ -2390,7 +2407,6 @@ static void process(rela_vm* vm, node_t* scope, node_t *node, int flags, int ind
 			process(vm, scope, node->args, 0, 0, -1);
 
 		int loop = compile(vm, OP_LOOP, nil(vm));
-
 		int begin = vm->code.depth;
 
 		// OP_FOR1 expects a vector with key[,val] variable names
@@ -2816,11 +2832,15 @@ static void op_unpack(rela_vm* vm) {
 		push(vm, vec_get(vm, vec, i));
 }
 
-static void op_pid(rela_vm* vm) {
+static void pid(rela_vm* vm, int id) {
 	assert(vm->routine->frames.depth);
 	frame_t* frame = &vm->routine->frames.cells[vm->routine->frames.depth-1];
 	// depth++ range is capped at compile time
-	frame->path.cells[frame->path.depth++] = literal(vm).inum;
+	frame->path.cells[frame->path.depth++] = id;
+}
+
+static void op_pid(rela_vm* vm) {
+	pid(vm, literal_int(vm));
 }
 
 static void op_type(rela_vm* vm) {
@@ -2841,18 +2861,26 @@ static item_t* local(rela_vm* vm, const char* key) {
 	return NULL;
 }
 
-static void op_lget(rela_vm* vm) {
+static void lget(rela_vm* vm, int index) {
 	cor_t* cor = vm->routine;
 	assert(cor->frames.depth);
 	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
-	push(vm, frame->locals.vals[literal_int(vm)]);
+	push(vm, frame->locals.vals[index]);
+}
+
+static void op_lget(rela_vm* vm) {
+	lget(vm, literal_int(vm));
+}
+
+static void lcall(rela_vm* vm, int index) {
+	cor_t* cor = vm->routine;
+	assert(cor->frames.depth);
+	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+	call(vm, frame->locals.vals[index]);
 }
 
 static void op_lcall(rela_vm* vm) {
-	cor_t* cor = vm->routine;
-	assert(cor->frames.depth);
-	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
-	call(vm, frame->locals.vals[literal_int(vm)]);
+	lcall(vm, literal_int(vm));
 }
 
 static void lset(rela_vm* vm, int index, item_t val) {
@@ -2910,10 +2938,7 @@ static void assign(rela_vm* vm, item_t key, item_t val) {
 	if (!map && cor->frames.depth) {
 		assert(key.type == STRING);
 		item_t* cell = local(vm, key.str);
-		if (cell) {
-			*cell = val;
-			return;
-		}
+		if (cell) { *cell = val; return; }
 		frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
 		// todo: depth++ range limit at compile time
 		ensure(vm, frame->locals.depth < LOCALS, "max %d locals per frame", LOCALS);
@@ -3568,35 +3593,35 @@ func_t funcs[OPERATIONS] = {
 	[OP_TYPE]      = { .name = "type",      .lib = true,  .func = op_type      },
 	[OP_GC]        = { .name = "collect",   .lib = true,  .func = gc           },
 	// math
-	[OP_SIN]       = { .name = "sin",       .lib = true, .func = op_sin       },
-	[OP_COS]       = { .name = "cos",       .lib = true, .func = op_cos       },
-	[OP_TAN]       = { .name = "tan",       .lib = true, .func = op_tan       },
-	[OP_ASIN]      = { .name = "asin",      .lib = true, .func = op_asin      },
-	[OP_ACOS]      = { .name = "acos",      .lib = true, .func = op_acos      },
-	[OP_ATAN]      = { .name = "atan",      .lib = true, .func = op_atan      },
-	[OP_COSH]      = { .name = "cosh",      .lib = true, .func = op_cosh      },
-	[OP_SINH]      = { .name = "sinh",      .lib = true, .func = op_sinh      },
-	[OP_TANH]      = { .name = "tanh",      .lib = true, .func = op_tanh      },
-	[OP_CEIL]      = { .name = "ceil",      .lib = true, .func = op_ceil      },
-	[OP_FLOOR]     = { .name = "floor",     .lib = true, .func = op_floor     },
-	[OP_SQRT]      = { .name = "sqrt",      .lib = true, .func = op_sqrt      },
-	[OP_ABS]       = { .name = "abs",       .lib = true, .func = op_abs       },
-	[OP_ATAN2]     = { .name = "atan2",     .lib = true, .func = op_atan2     },
-	[OP_LOG]       = { .name = "log",       .lib = true, .func = op_log       },
-	[OP_LOG10]     = { .name = "log10",     .lib = true, .func = op_log10     },
-	[OP_POW]       = { .name = "pow",       .lib = true, .func = op_pow       },
-	[OP_MIN]       = { .name = "min",       .lib = true, .func = op_min       },
-	[OP_MAX]       = { .name = "max",       .lib = true, .func = op_max       },
+	[OP_SIN]       = { .name = "sin",       .lib = true,  .func = op_sin,       },
+	[OP_COS]       = { .name = "cos",       .lib = true,  .func = op_cos,       },
+	[OP_TAN]       = { .name = "tan",       .lib = true,  .func = op_tan,       },
+	[OP_ASIN]      = { .name = "asin",      .lib = true,  .func = op_asin,      },
+	[OP_ACOS]      = { .name = "acos",      .lib = true,  .func = op_acos,      },
+	[OP_ATAN]      = { .name = "atan",      .lib = true,  .func = op_atan,      },
+	[OP_COSH]      = { .name = "cosh",      .lib = true,  .func = op_cosh,      },
+	[OP_SINH]      = { .name = "sinh",      .lib = true,  .func = op_sinh,      },
+	[OP_TANH]      = { .name = "tanh",      .lib = true,  .func = op_tanh,      },
+	[OP_CEIL]      = { .name = "ceil",      .lib = true,  .func = op_ceil,      },
+	[OP_FLOOR]     = { .name = "floor",     .lib = true,  .func = op_floor,     },
+	[OP_SQRT]      = { .name = "sqrt",      .lib = true,  .func = op_sqrt,      },
+	[OP_ABS]       = { .name = "abs",       .lib = true,  .func = op_abs,       },
+	[OP_ATAN2]     = { .name = "atan2",     .lib = true,  .func = op_atan2,     },
+	[OP_LOG]       = { .name = "log",       .lib = true,  .func = op_log,       },
+	[OP_LOG10]     = { .name = "log10",     .lib = true,  .func = op_log10,     },
+	[OP_POW]       = { .name = "pow",       .lib = true,  .func = op_pow,       },
+	[OP_MIN]       = { .name = "min",       .lib = true,  .func = op_min,       },
+	[OP_MAX]       = { .name = "max",       .lib = true,  .func = op_max,       },
 	// peephole
-	[OPP_FNAME]    = { .name = "fname",     .lib = false, .func = op_fname     },
-	[OPP_GNAME]    = { .name = "gname",     .lib = false, .func = op_gname     },
-	[OPP_CFUNC]    = { .name = "cfunc",     .lib = false, .func = op_cfunc     },
-	[OPP_ASSIGNP]  = { .name = "assignp",   .lib = false, .func = op_assignp   },
-	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl   },
-	[OPP_MUL_LIT]  = { .name = "litmul",    .lib = false, .func = op_mul_lit   },
-	[OPP_ADD_LIT]  = { .name = "litadd",    .lib = false, .func = op_add_lit   },
-	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies    },
-	[OPP_UPDATE]   = { .name = "update",    .lib = false, .func = op_update    },
+	[OPP_FNAME]    = { .name = "fname",     .lib = false, .func = op_fname,     },
+	[OPP_GNAME]    = { .name = "gname",     .lib = false, .func = op_gname,     },
+	[OPP_CFUNC]    = { .name = "cfunc",     .lib = false, .func = op_cfunc,     },
+	[OPP_ASSIGNP]  = { .name = "assignp",   .lib = false, .func = op_assignp,   },
+	[OPP_ASSIGNL]  = { .name = "assignl",   .lib = false, .func = op_assignl,   },
+	[OPP_MUL_LIT]  = { .name = "litmul",    .lib = false, .func = op_mul_lit,   },
+	[OPP_ADD_LIT]  = { .name = "litadd",    .lib = false, .func = op_add_lit,   },
+	[OPP_COPIES]   = { .name = "copies",    .lib = false, .func = op_copies,    },
+	[OPP_UPDATE]   = { .name = "update",    .lib = false, .func = op_update,    },
 };
 
 static void decompile(rela_vm* vm, code_t* c) {
@@ -3604,6 +3629,659 @@ static void decompile(rela_vm* vm, code_t* c) {
 	const char *str = tmptext(vm, c->item, tmp, sizeof(tmp));
 	fprintf(stderr, "%04ld  %-10s  %s\n", c - vm->code.cells, funcs[c->op].name, str);
 	fflush(stderr);
+}
+
+#ifdef __linux__
+
+static void jit_byte(rela_vm* vm, unsigned char b) {
+	unsigned char *p = vm->jit.code + vm->jit.depth;
+	*p = b;
+	vm->jit.depth++;
+}
+
+static void jit_int(rela_vm* vm, int i) {
+	int* p = (int*)(vm->jit.code + vm->jit.depth);
+	memcpy(p, &i, 4);
+	vm->jit.depth += 4;
+}
+
+static void jit_addr(rela_vm* vm, void* a) {
+	void** p = (void*)(vm->jit.code + vm->jit.depth);
+	memcpy(p, &a, 8);
+	vm->jit.depth += 8;
+}
+
+// r15 = vm
+// r14 = &vm->routine
+// r13 = vm->jit.iptrx
+// r12 = &vm->routine->ip
+
+static void jit_call(rela_vm* vm, int ip, void* p) {
+	// set ip
+	// mov dword [r12],n
+	jit_byte(vm, 0x41);
+	jit_byte(vm, 0xc7);
+	jit_byte(vm, 0x04);
+	jit_byte(vm, 0x24);
+	jit_int(vm, ip);
+	// arg1 vm
+	// mov rdi,r15
+	jit_byte(vm, 0x4c);
+	jit_byte(vm, 0x89);
+	jit_byte(vm, 0xff);
+	// call
+	// mov rax,fn
+	jit_byte(vm, 0x48);
+	jit_byte(vm, 0xb8);
+	jit_addr(vm, p);
+	jit_byte(vm, 0xff);
+	// call rax
+	jit_byte(vm, 0xd0);
+}
+
+static void jit_op(rela_vm* vm, int ip, int op) {
+	jit_call(vm, ip, funcs[op].func);
+}
+
+static void jit_sync(rela_vm* vm) {
+	// fetch routine
+	// mov r9,[r14]
+	jit_byte(vm, 0x4d);
+	jit_byte(vm, 0x8b);
+	jit_byte(vm, 0x0e);
+	// calc ip address
+	// lea r12,[r9+ipoffset]
+	jit_byte(vm, 0x4d);
+	jit_byte(vm, 0x8d);
+	jit_byte(vm, 0xa1);
+	jit_int(vm, offsetof(cor_t, ip));
+	// index iptrx
+	// mov eax,[r12]
+	jit_byte(vm, 0x41);
+	jit_byte(vm, 0x8b);
+	jit_byte(vm, 0x04);
+	jit_byte(vm, 0x24);
+	// shl eax,3
+	jit_byte(vm, 0xc1);
+	jit_byte(vm, 0xe0);
+	jit_byte(vm, 0x03);
+	// add rax,r13
+	jit_byte(vm, 0x4c);
+	jit_byte(vm, 0x01);
+	jit_byte(vm, 0xe8);
+	// jmp [rax]
+	jit_byte(vm, 0xff);
+	jit_byte(vm, 0x20);
+}
+
+static void jit(rela_vm* vm) {
+	vm->jit.limit = vm->code.depth * 128;
+
+	vm->jit.code = mmap(0, vm->jit.limit, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	ensure(vm, vm->jit.code, "mmap %d", errno);
+
+	vm->jit.iptrx = calloc(vm->code.depth, sizeof(void*));
+	ensure(vm, vm->jit.iptrx, "oom");
+
+	// function prefix
+	// callee-saved registers
+	jit_byte(vm, 0x55); // push rbp
+	jit_byte(vm, 0x53); // push rbx
+	jit_byte(vm, 0x41); // push r15
+	jit_byte(vm, 0x57);
+	jit_byte(vm, 0x41); // push r14
+	jit_byte(vm, 0x56);
+	jit_byte(vm, 0x41); // push r13
+	jit_byte(vm, 0x55);
+	jit_byte(vm, 0x41); // push r12
+	jit_byte(vm, 0x54);
+
+	// rsp alignment
+	jit_byte(vm, 0x6a); // push qword 0
+	jit_byte(vm, 0x00);
+
+	jit_byte(vm, 0x48); // mov rbp, rsp
+	jit_byte(vm, 0x89);
+	jit_byte(vm, 0xe5);
+
+	jit_byte(vm, 0x49); // mov r15,vm
+	jit_byte(vm, 0xbf);
+	jit_addr(vm, vm);
+	jit_byte(vm, 0x49); // mov r14,&routine
+	jit_byte(vm, 0xbe);
+	jit_addr(vm, &vm->routine);
+	jit_byte(vm, 0x49); // mov r13,vm->jit.iptrx
+	jit_byte(vm, 0xbd);
+	jit_addr(vm, vm->jit.iptrx);
+
+	jit_sync(vm);
+
+	for (int i = 0, l = vm->code.depth; i < l; i++) {
+		vm->jit.iptrx[i] = &vm->jit.code[vm->jit.depth];
+		code_t code = vm->code.cells[i];
+
+		switch (code.op) {
+			case OP_STOP:
+				// function suffix
+				jit_byte(vm, 0x58); // align rsp
+				jit_byte(vm, 0x41); // pop r15
+				jit_byte(vm, 0x5f);
+				jit_byte(vm, 0x41); // pop r14
+				jit_byte(vm, 0x5e);
+				jit_byte(vm, 0x41); // pop r13
+				jit_byte(vm, 0x5d);
+				jit_byte(vm, 0x41); // pop r12
+				jit_byte(vm, 0x5c);
+				jit_byte(vm, 0x5b); // pop rbx
+				jit_byte(vm, 0x5d); // pop rbp
+				jit_byte(vm, 0xc3); // ret
+				break;
+
+			case OP_MARK:
+				// vm->routine->marks.cells[vm->routine->marks.depth++] = vm->routine->stack.depth;
+				// mov r10,[r14]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x16);
+				// mov eax,[r10+marks.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, marks.depth));
+				// shl rax,2
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xc1);
+				jit_byte(vm, 0xe0);
+				jit_byte(vm, 0x02);
+				// lea r9,[r10+rax+marks.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x8c);
+				jit_byte(vm, 0x02);
+				jit_int(vm, offsetof(cor_t, marks.cells));
+				// mov eax,[r10+stack.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, stack.depth));
+				// mov [r9],eax
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x89);
+				jit_byte(vm, 0x01);
+				// inc dword [r10+marks.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, marks.depth));
+				break;
+
+			case OP_PID:
+				// frame_t* frame = &vm->routine->frames.cells[vm->routine->frames.depth-1];
+				// frame->path.cells[frame->path.depth++] = literal(vm).inum;
+
+				// fetch routine
+				// mov r10,[r14]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x16);
+
+				// r9 = &vm->routine->frames.cells
+				// lea r9,[r10+frames.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x8a);
+				jit_int(vm, offsetof(cor_t, frames.cells));
+
+				// r8 = &vm->routine->frames.depth
+				// lea r8,[r10+frames.depth]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, frames.depth));
+
+				// eax = vm->routine->frames.depth
+				// mov eax,[r8]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x00);
+
+				// eax = vm->routine->frames.depth-1
+				// dec eax
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xc8);
+
+				// eax = (vm->routine->frames.depth-1)*sizeof(frame_t)
+				// imul eax,n
+				jit_byte(vm, 0x69);
+				jit_byte(vm, 0xc0);
+				jit_int(vm, sizeof(frame_t));
+
+				// r9 = &vm->routine->frame.cells[vm->routine->frames.depth-1]
+				// add r9,rax
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x01);
+				jit_byte(vm, 0xc1);
+
+				// r10 = &frame->path.cells
+				// lea r10,[r9+path.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x91);
+				jit_int(vm, offsetof(frame_t, path.cells));
+
+				// r11 = &frame->path.depth
+				// lea r11,[r9+path.depth]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x99);
+				jit_int(vm, offsetof(frame_t, path.depth));
+
+				// eax = frame->path.depth
+				// mov eax,[r11]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x03);
+
+				// eax = frame->path.depth*4
+				// shl eax,2
+				jit_byte(vm, 0xc1);
+				jit_byte(vm, 0xe0);
+				jit_byte(vm, 0x02);
+
+				// r10 = &frame->path[frame->path.depth]
+				// add r10,rax
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x01);
+				jit_byte(vm, 0xc2);
+
+				int n = 0;
+
+				for (;;) {
+					n++;
+					// mov dword [r10],literal
+					jit_byte(vm, 0x41);
+					jit_byte(vm, 0xc7);
+					jit_byte(vm, 0x02);
+					jit_int(vm, code.item.inum);
+
+					if (i+1 < l && vm->code.cells[i+1].op == OP_PID) {
+						code = vm->code.cells[++i];
+						vm->jit.iptrx[i] = NULL;
+						// add r10,4
+						jit_byte(vm, 0x49);
+						jit_byte(vm, 0x83);
+						jit_byte(vm, 0xc2);
+						jit_byte(vm, 0x04);
+						continue;
+					}
+
+					break;
+				}
+
+				// add dword [r11],n
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x83);
+				jit_byte(vm, 0x03);
+				jit_byte(vm, n);
+
+				break;
+
+			case OP_LGET:
+//				// mov rsi,n
+//				jit_byte(vm, 0xbe);
+//				jit_int(vm, code.item.inum);
+//				jit_call(vm, i+1, lget);
+
+//	cor_t* cor = vm->routine;
+//	assert(cor->frames.depth);
+//	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+//	push(vm, frame->locals.vals[index]);
+
+				// r10 = vm->routine
+				// mov r10,[r14]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x16);
+				// mov eax,[r10+frames.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, frames.depth));
+				// dec eax
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xc8);
+				// imul rax,sizeof(frame_t)
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0x69);
+				jit_byte(vm, 0xc0);
+				jit_int(vm, sizeof(frame_t));
+				// lea r9,[r10+rax+frames.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x8c);
+				jit_byte(vm, 0x02);
+				jit_int(vm, offsetof(cor_t, frames.cells));
+				// lea rsi,[r9+locals.vals+localoffset]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0xb1);
+				jit_int(vm, offsetof(frame_t, locals.vals) + code.item.inum*sizeof(item_t));
+				// mov eax,[r10+stack.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, stack.depth));
+				// rax *= sizeof(item_t)
+				// shl rax,4
+				jit_byte(vm, 0xc1);
+				jit_byte(vm, 0xe0);
+				jit_byte(vm, 0x04);
+				// lea rdi,[r10+rax+stack.cells]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0xbc);
+				jit_byte(vm, 0x02);
+				jit_int(vm, offsetof(cor_t, stack.cells));
+				// lodsq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xad);
+				// stosq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xab);
+				// lodsq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xad);
+				// stosq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xab);
+				// inc dword [r10+stack.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, stack.depth));
+				break;
+
+			case OP_LSET:
+//				// mov rsi,n
+//				jit_byte(vm, 0xbe);
+//				jit_int(vm, code.item.inum);
+//				jit_call(vm, i+1, lget);
+
+//	cor_t* cor = vm->routine;
+//	assert(cor->frames.depth);
+//	frame_t* frame = &cor->frames.cells[cor->frames.depth-1];
+//	frame->locals.vals[index] = pop(vm);
+
+				// r10 = vm->routine
+				// mov r10,[r14]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x16);
+				// dec dword [r10+stack.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0x8a);
+				jit_int(vm, offsetof(cor_t, stack.depth));
+				// mov eax,[r10+frames.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, frames.depth));
+				// dec eax
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xc8);
+				// imul rax,sizeof(frame_t)
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0x69);
+				jit_byte(vm, 0xc0);
+				jit_int(vm, sizeof(frame_t));
+				// lea r9,[r10+rax+frames.cells]
+				jit_byte(vm, 0x4d);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0x8c);
+				jit_byte(vm, 0x02);
+				jit_int(vm, offsetof(cor_t, frames.cells));
+				// lea rdi,[r9+locals.vals+localoffset]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0xb9);
+				jit_int(vm, offsetof(frame_t, locals.vals) + code.item.inum*sizeof(item_t));
+				// mov eax,[r10+stack.depth]
+				jit_byte(vm, 0x41);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x82);
+				jit_int(vm, offsetof(cor_t, stack.depth));
+				// rax *= sizeof(item_t)
+				// shl rax,4
+				jit_byte(vm, 0xc1);
+				jit_byte(vm, 0xe0);
+				jit_byte(vm, 0x04);
+				// lea rsi,[r10+rax+stack.cells]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8d);
+				jit_byte(vm, 0xb4);
+				jit_byte(vm, 0x02);
+				jit_int(vm, offsetof(cor_t, stack.cells));
+				// lodsq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xad);
+				// stosq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xab);
+				// lodsq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xad);
+				// stosq
+				jit_byte(vm, 0x48);
+				jit_byte(vm, 0xab);
+				break;
+
+			case OPP_LCALL:
+				// mov rsi,n
+				jit_byte(vm, 0xbe);
+				jit_int(vm, code.item.inum);
+				jit_call(vm, i+1, lcall);
+				jit_sync(vm);
+				break;
+
+			case OP_JMP:
+				// indirect address from iptrx
+				// mov rax,[r13+ip]
+				jit_byte(vm, 0x49);
+				jit_byte(vm, 0x8b);
+				jit_byte(vm, 0x85);
+				jit_int(vm, code.item.inum*8);
+				// jmp rax
+				jit_byte(vm, 0xff);
+				jit_byte(vm, 0xe0);
+				break;
+
+//			case OP_PRINT:
+//			case OP_GLOBAL:
+//			case OP_META_SET:
+//			case OP_META_GET:
+//			case OP_VECTOR:
+//			case OP_VPUSH:
+//			case OP_MAP:
+//			case OP_UNMAP:
+//			case OP_MARK:
+//			case OP_LIMIT:
+//			case OP_CLEAN:
+//			case OP_NIL:
+//			case OP_COPY:
+//			case OP_SHUNT:
+//			case OP_SHIFT:
+//			case OP_TRUE:
+//			case OP_FALSE:
+//			case OP_LIT:
+//			case OP_ASSIGN:
+//			case OP_FIND:
+//			case OP_SET:
+//			case OP_GET:
+//			case OP_COUNT:
+//			case OP_DROP:
+//			case OP_ADD:
+//			case OP_NEG:
+//			case OP_SUB:
+//			case OP_MUL:
+//			case OP_DIV:
+//			case OP_MOD:
+//			case OP_NOT:
+//			case OP_EQ:
+//			case OP_NE:
+//			case OP_LT:
+//			case OP_LTE:
+//			case OP_GT:
+//			case OP_GTE:
+//			case OP_AND:
+//			case OP_OR:
+//			case OP_CONCAT:
+//			case OP_UNPACK:
+//			case OP_MATCH:
+//			case OP_SORT:
+//			case OP_ASSERT:
+//			case OP_TYPE:
+//			case OP_GC:
+//			case OP_SIN:
+//			case OP_COS:
+//			case OP_TAN:
+//			case OP_ASIN:
+//			case OP_ACOS:
+//			case OP_ATAN:
+//			case OP_COSH:
+//			case OP_SINH:
+//			case OP_TANH:
+//			case OP_CEIL:
+//			case OP_FLOOR:
+//			case OP_SQRT:
+//			case OP_ABS:
+//			case OP_ATAN2:
+//			case OP_LOG:
+//			case OP_LOG10:
+//			case OP_POW:
+//			case OP_MIN:
+//			case OP_MAX:
+//			case OPP_FNAME:
+//			case OPP_GNAME:
+//			case OPP_ASSIGNP:
+//			case OPP_ASSIGNL:
+//			case OPP_MUL_LIT:
+//			case OPP_COPIES:
+
+			case OP_COROUTINE:
+			case OP_RESUME:
+			case OP_YIELD:
+			case OP_CALL:
+			case OP_RETURN:
+			case OP_LOOP:
+			case OP_UNLOOP:
+			case OP_BREAK:
+			case OP_CONTINUE:
+			case OP_JFALSE:
+			case OP_JTRUE:
+			case OP_FOR1:
+			case OP_FOR2:
+//			case OPP_LCALL:
+			case OPP_CFUNC:
+			case OPP_UPDATE:
+				// normal call that may change routine/ip
+				jit_op(vm, i+1, code.op);
+				jit_sync(vm);
+				break;
+
+			default:
+				jit_op(vm, i+1, code.op);
+				break;
+		}
+	}
+
+	// function suffix
+	jit_byte(vm, 0x58); // align rsp
+	jit_byte(vm, 0x41); // pop r15
+	jit_byte(vm, 0x5f);
+	jit_byte(vm, 0x41); // pop r14
+	jit_byte(vm, 0x5e);
+	jit_byte(vm, 0x41); // pop r13
+	jit_byte(vm, 0x5d);
+	jit_byte(vm, 0x41); // pop r12
+	jit_byte(vm, 0x5c);
+	jit_byte(vm, 0x5b); // pop rbx
+	jit_byte(vm, 0x5d); // pop rbp
+	jit_byte(vm, 0xc3); // ret
+
+	fprintf(stderr, "code %u jit %u %u\n", vm->code.depth, vm->jit.depth, vm->jit.limit);
+
+	ensure(vm, 0 == mprotect(vm->jit.code, vm->jit.limit, PROT_READ | PROT_EXEC), "mprotect %d", errno);
+}
+#endif
+
+static bool tick(rela_vm* vm) {
+	int ip = vm->routine->ip++;
+	assert(ip >= 0 && ip < vm->code.depth);
+	int opcode = vm->code.cells[ip].op;
+	if (opcode == OP_STOP) return false;
+	funcs[opcode].func(vm);
+	return true;
+}
+
+//static void tick_all(rela_vm* vm) {
+//	for (;;) {
+//		int ip = vm->routine->ip++;
+//		assert(ip >= 0 && ip < vm->code.depth);
+//		int opcode = vm->code.cells[ip].op;
+//
+//		switch (opcode) {
+//			// <order-important>
+//			case OP_STOP: { return; break; }
+//			case OP_JMP: { op_jmp(vm); break; }
+//			case OP_FOR2: { op_for2(vm); break; }
+//			case OP_PID: { op_pid(vm); break; }
+//			case OP_LIT: { op_lit(vm); break; }
+//			case OP_MARK: { op_mark(vm); break; }
+//			case OP_LIMIT: { op_limit(vm); break; }
+//			case OP_CLEAN: { op_clean(vm); break; }
+//			case OP_RETURN: { op_return(vm); break; }
+//			case OP_LSET: { op_lset(vm); break; }
+//			case OP_LGET: { op_lget(vm); break; }
+//			case OPP_LCALL: { op_lcall(vm); break; }
+//			case OPP_FNAME: { op_fname(vm); break; }
+//			case OPP_CFUNC: { op_cfunc(vm); break; }
+//			case OPP_ASSIGNL: { op_assignl(vm); break; }
+//			case OPP_ASSIGNP: { op_assignp(vm); break; }
+//			case OPP_MUL_LIT: { op_mul_lit(vm); break; }
+//			case OPP_ADD_LIT: { op_add_lit(vm); break; }
+//			// </order-important>
+//			case OP_ADD: { op_add(vm); break; }
+//			default: funcs[opcode].func(vm); break;
+//		}
+//	}
+//}
+
+static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, item_t* retv) {
+	ensure(vm, func.type == SUBROUTINE || func.type == CALLBACK, "invalid method");
+
+	cor_t* cor = vm->routine;
+	int frame = cor->frames.depth;
+
+	op_mark(vm);
+
+	for (int i = 0; i < argc; i++) push(vm, argv[i]);
+
+	call(vm, func);
+
+	if (func.type == SUBROUTINE) {
+		while (tick(vm)) {
+			if (vm->routine != cor) continue;
+			if (frame < cor->frames.depth) continue;
+			break;
+		}
+	}
+
+	for (int i = 0; i < retc; i++) {
+		retv[i] = i < depth(vm) ? *item(vm, i): nil(vm);
+	}
+
+	limit(vm, 0);
 }
 
 static void destroy(rela_vm* vm) {
@@ -3642,6 +4320,7 @@ rela_vm* rela_create(const char* src, size_t registrations, const rela_register*
 }
 
 rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t registrations, const rela_register* registry, void* custom) {
+	fprintf(stderr, "frame_t %lu\n", sizeof(frame_t));
 	rela_vm* vm = calloc(sizeof(rela_vm),1);
 	if (!vm) return NULL;
 
@@ -3712,6 +4391,10 @@ rela_vm* rela_create_ex(size_t modules, const rela_module* modistry, size_t regi
 	memmove(&vm->stringsB, &vm->stringsA, sizeof(string_region_t));
 	memset(&vm->stringsA, 0, sizeof(string_region_t));
 
+	#ifdef __linux__
+		jit(vm);
+	#endif
+
 	gc(vm);
 	return vm;
 }
@@ -3724,74 +4407,6 @@ int rela_run(rela_vm* vm) {
 	return rela_run_ex(vm, 1, (int[]){0});
 }
 
-static bool tick(rela_vm* vm) {
-	int ip = vm->routine->ip++;
-	assert(ip >= 0 && ip < vm->code.depth);
-	int opcode = vm->code.cells[ip].op;
-	if (opcode == OP_STOP) return false;
-	funcs[opcode].func(vm);
-	return true;
-}
-
-static void tick_all(rela_vm* vm) {
-	for (;;) {
-		int ip = vm->routine->ip++;
-		assert(ip >= 0 && ip < vm->code.depth);
-		int opcode = vm->code.cells[ip].op;
-
-		switch (opcode) {
-			// <order-important>
-			case OP_STOP: { return; break; }
-			case OP_JMP: { op_jmp(vm); break; }
-			case OP_FOR2: { op_for2(vm); break; }
-			case OP_PID: { op_pid(vm); break; }
-			case OP_LIT: { op_lit(vm); break; }
-			case OP_MARK: { op_mark(vm); break; }
-			case OP_LIMIT: { op_limit(vm); break; }
-			case OP_CLEAN: { op_clean(vm); break; }
-			case OP_RETURN: { op_return(vm); break; }
-			case OP_LSET: { op_lset(vm); break; }
-			case OP_LGET: { op_lget(vm); break; }
-			case OPP_LCALL: { op_lcall(vm); break; }
-			case OPP_FNAME: { op_fname(vm); break; }
-			case OPP_CFUNC: { op_cfunc(vm); break; }
-			case OPP_ASSIGNL: { op_assignl(vm); break; }
-			case OPP_ASSIGNP: { op_assignp(vm); break; }
-			case OPP_MUL_LIT: { op_mul_lit(vm); break; }
-			case OPP_ADD_LIT: { op_add_lit(vm); break; }
-			// </order-important>
-			case OP_ADD: { op_add(vm); break; }
-			default: funcs[opcode].func(vm); break;
-		}
-	}
-}
-
-static void method(rela_vm* vm, item_t func, int argc, item_t* argv, int retc, item_t* retv) {
-	ensure(vm, func.type == SUBROUTINE || func.type == CALLBACK, "invalid method");
-
-	cor_t* cor = vm->routine;
-	int frame = cor->frames.depth;
-
-	op_mark(vm);
-
-	for (int i = 0; i < argc; i++) push(vm, argv[i]);
-
-	call(vm, func);
-
-	if (func.type == SUBROUTINE) {
-		while (tick(vm)) {
-			if (vm->routine != cor) continue;
-			if (frame < cor->frames.depth) continue;
-			break;
-		}
-	}
-
-	for (int i = 0; i < retc; i++) {
-		retv[i] = i < depth(vm) ? *item(vm, i): nil(vm);
-	}
-
-	limit(vm, 0);
-}
 
 int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	int wtf = setjmp(vm->jmp);
@@ -3810,7 +4425,13 @@ int rela_run_ex(rela_vm* vm, int modules, int* modlist) {
 	for (int mod = 0; mod < modules; mod++) {
 		ensure(vm, modlist[mod] < vec_size(vm, &vm->modules.entries), "invalid module %d", modlist[mod]);
 		vm->routine->ip = vec_get(vm, &vm->modules.entries, modlist[mod]).inum;
-		tick_all(vm);
+		#ifdef __linux__
+//			void (*call)() = vm->jit.iptrx[vm->routine->ip];
+			void (*call)() = (void*)(vm->jit.code);
+			call();
+		#else
+			tick_all(vm);
+		#endif
 	}
 	reset(vm);
 	return 0;
