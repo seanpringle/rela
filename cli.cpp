@@ -20,31 +20,36 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "rela.h"
+#include "rela.hpp"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 static char* slurp(const char* script);
 
-void hello(rela_vm* rela) {
-	rela_push(rela, rela_make_string(rela, "hello world"));
-}
+class RelaCLI : public Rela {
+public:
+	struct {
+		int main = 0;
+	} modules;
 
-rela_register registry[] = {
-	{"hello", hello},
+	RelaCLI(const char* source) : Rela() {
+		map_set(map_core(), make_string("hello"), make_function(1));
+		modules.main = module(source);
+	}
+
+	void execute(int id) override {
+		if (id == 1) hello();
+	}
+
+	void hello() {
+		stack_push(make_string("hello world"));
+	}
 };
 
 int run(const char* source, bool decompile) {
-	rela_vm* rela = rela_create(source, 1, registry, NULL);
-	if (!rela) return 1;
-
-	if (decompile) rela_decompile(rela);
-
-	int rc = rela_run(rela);
-
-	rela_destroy(rela);
-
-	return rc;
+	RelaCLI rela(source);
+	if (decompile) rela.decompile();
+	return rela.run();
 }
 
 int main(int argc, char* argv[]) {
@@ -81,7 +86,7 @@ static char* slurp(const char* script) {
 		FILE *file = fopen(script, "r");
 		if (file) {
 			size_t bytes = st.st_size;
-			source = malloc(bytes + 1);
+			source = (char*)malloc(bytes + 1);
 			size_t read = fread(source, 1, bytes, file);
 			source[bytes] = 0;
 			if (read != bytes) {
@@ -93,3 +98,4 @@ static char* slurp(const char* script) {
 	}
 	return source;
 }
+

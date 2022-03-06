@@ -1,21 +1,17 @@
 
 dev: LFLAGS=-lm -lpcre
-dev: CFLAGS=-Wall -Werror -Og -g -std=c11 -DPCRE
-dev: rela.o cli.o
-	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
+dev: CFLAGS=-Wall -O0 -g -DPCRE -Wno-format-truncation
+dev:
+	g++ $(CFLAGS) -std=c++17 -o rela cli.cpp $(LFLAGS)
 
 rel: LFLAGS=-lm -lpcre
-rel: CFLAGS=-Wall -O3 -std=c11 -DNDEBUG -DPCRE -DPCRE_STUDY_JIT_COMPILE
-rel: rela.o cli.o
-	gcc $(CFLAGS) -o rela rela.o cli.o $(LFLAGS)
-	ar rcs librela.a rela.o
+rel: CFLAGS=-Wall -O3 -DPCRE -Wno-format-truncation
+rel:
+	g++ $(CFLAGS) -std=c++17 -o rela cli.cpp $(LFLAGS)
 
 prof: rel
 	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libprofiler.so.0 CPUPROFILE=/tmp/rela.prof ./rela bench.rela
 	google-pprof --web ./rela /tmp/rela.prof
-
-%.o: %.c *.h
-	gcc $(CFLAGS) -c $< -o $@
 
 .PHONY: test
 test:
