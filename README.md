@@ -11,37 +11,40 @@ Rela is a scripting language designed to:
 
 ## Basic workflow
 
-* Create a Rela instance with `rela_create()`
-  * Pass in a script and a table of C callbacks
-  * Source code is compiled to byte code
+* Extend the Rela class
+  * Attach callback methods as functions
+  * Compile source code to byte code modules
 
-* Call `rela_run()` repeatedly
+* Call `.run()` repeatedly
   * Byte code executes each time on a fresh run-time state
   * Persistence and global state done via callbacks as needed
   * Run-time memory regions are released
 
-* Call `rela_destroy()`
-
 ```c
-void hello(rela_vm* rela) {
-  rela_push(rela, rela_make_string(rela, "hello world"));
-}
+class RelaCLI : public Rela {
+public:
+    struct {
+        int main = 0;
+    } modules;
 
-rela_register registry[] = {
-  {"hello", hello},
+    RelaCLI(const char* source) : Rela() {
+        map_set(map_core(), make_string("hello"), make_function(1));
+        modules.main = module(source);
+    }
+
+    void execute(int id) override {
+        if (id == 1) hello();
+    }
+
+    void hello() {
+        stack_push(make_string("hello world"));
+    }
 };
 
-bool run(const char* source) {
-  int ok = false;
-
-  rela_vm* rela = rela_create(source, 1, registry, NULL);
-
-  if (rela) {
-    ok = rela_run(rela) == 0;
-    rela_destroy(rela);
-  }
-
-  return ok;
+int run(const char* source, bool decompile) {
+    RelaCLI rela(source);
+    if (decompile) rela.decompile();
+    return rela.run();
 }
 ```
 
@@ -57,9 +60,9 @@ There is a simple mark-and-sweep stop-the-world garbage collector that the VM
 guarantees never to implicitly trigger during execution. Instead, memory
 reclamation occurs when:
 
-* `rela_create()` completes and compile-time regions are reset
-* `rela_run()` completes and run-time regions are reset
-* A callback explicitly calls `rela_collect()`
+* Constructor completes and compile-time regions are reset
+* `Rela::run()` completes and run-time regions are reset
+* A callback explicitly calls `Rela::collect()`
 * A script explicitly calls `lib.collect()`
 
 The host application can decide which approach is best. The best GC for an
