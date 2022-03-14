@@ -66,7 +66,7 @@ class Rela {
 
 	enum type_t {
 		NIL = 0, INTEGER, FLOAT, STRING, BOOLEAN, VECTOR, MAP, SUBROUTINE, COROUTINE, OPERATION,
-		CALLBACK, USERDATA, TYPES
+		EXECUTE, USERDATA, TYPES
 	};
 
 	const char* type_names[TYPES] = {
@@ -80,7 +80,7 @@ class Rela {
 		[SUBROUTINE] = "subroutine",
 		[COROUTINE] = "coroutine",
 		[OPERATION] = "operation",
-		[CALLBACK] = "callback",
+		[EXECUTE] = "callback",
 		[USERDATA] = "userdata",
 	};
 
@@ -759,14 +759,14 @@ class Rela {
 		if (a.type == SUBROUTINE) return true;
 		if (a.type == COROUTINE) return true;
 		if (a.type == OPERATION) return true;
-		if (a.type == CALLBACK) return true;
+		if (a.type == EXECUTE) return true;
 		if (a.type == USERDATA) return a.data != nullptr;
 		return false;
 	}
 
 	bool meta_get(item_t meta, const char* name, item_t *func) {
 		if (meta.type == MAP) return map_get(meta.map, string(name), func);
-		if (meta.type == SUBROUTINE || meta.type == CALLBACK) {
+		if (meta.type == SUBROUTINE || meta.type == EXECUTE) {
 			item_t key = string(name);
 			method(meta, 1, &key, 1, func);
 			return func->type != NIL;
@@ -956,7 +956,7 @@ class Rela {
 		if (a.type == SUBROUTINE) snprintf(tmp, size, "%s(%d)", type_names[a.type], a.sub);
 		if (a.type == COROUTINE) snprintf(tmp, size, "%s", type_names[a.type]);
 		if (a.type == OPERATION) snprintf(tmp, size, "%s", operation_name(a.opcode));
-		if (a.type == CALLBACK) snprintf(tmp, size, "%s", type_names[a.type]);
+		if (a.type == EXECUTE) snprintf(tmp, size, "%s", type_names[a.type]);
 
 		if (a.type == USERDATA && meta_get(a.data->meta, "$", &func)) {
 			method(func, 1, argv, 1, retv);
@@ -2625,7 +2625,7 @@ class Rela {
 			operation_call(item.opcode);
 			return;
 		}
-		if (item.type == CALLBACK) {
+		if (item.type == EXECUTE) {
 			execute(item.function);
 			return;
 		}
@@ -2930,7 +2930,7 @@ class Rela {
 			}
 		}
 		else
-		if (iter.type == SUBROUTINE || iter.type == CALLBACK) {
+		if (iter.type == SUBROUTINE || iter.type == EXECUTE) {
 			item_t argv[1] = {integer(step)};
 			item_t retv[2] = {nil(), nil()};
 			method(iter, 1, argv, 2, retv);
@@ -3589,7 +3589,7 @@ class Rela {
 	}
 
 	void method(item_t func, int argc, item_t* argv, int retc, item_t* retv) {
-		must(func.type == SUBROUTINE || func.type == CALLBACK, "invalid method");
+		must(func.type == SUBROUTINE || func.type == EXECUTE, "invalid method");
 
 		cor_t* cor = routine;
 		int frame = cor->frames.depth;
@@ -3860,7 +3860,7 @@ public:
 	}
 
 	oitem make_function(int id) {
-		return smudge((item_t){.type = CALLBACK, .function = id});
+		return smudge((item_t){.type = EXECUTE, .function = id});
 	}
 
 	bool is_nil(oitem opaque) {
