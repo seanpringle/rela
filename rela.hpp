@@ -22,6 +22,7 @@
 
 #pragma once
 #include <array>
+#include <string>
 #include <vector>
 #include <deque>
 #include <set>
@@ -1677,7 +1678,8 @@ class Rela {
 			// chained vector[n] or map[k] expressions
 			if (source[offset] == '[') {
 				offset++;
-				offset += parse_node(&source[offset]);
+//				offset += parse_node(&source[offset]);
+				offset += parse(&source[offset], RESULTS_FIRST, PARSE_UNGREEDY);
 				prev->chain = parsed;
 				parsed = nullptr;
 				prev = prev->chain;
@@ -1921,6 +1923,14 @@ class Rela {
 			// end substack frame
 			if (wrap)
 				compile(OP_LIMIT, integer(node->results));
+
+			// [expr]
+			if (node->index)
+				compile(assigning ? OP_SET: OP_GET, nil());
+
+			// [expr](...)
+			if (node->chain)
+				process(scope, node->chain, flag_assign ? PROCESS_ASSIGN: 0, 0, 1);
 		}
 		else
 		if (node->type == NODE_NAME) {
@@ -1931,16 +1941,16 @@ class Rela {
 				assert(!assigning);
 
 				// vecmap[fn()]
-				if (node->index) {
-					compile(OP_MARK, nil());
-						if (node->args)
-							process(scope, node->args, 0, 0, -1);
-						compile(OP_LIT, node->item);
-						compile(OP_FIND, nil());
-						compile(OP_CALL, nil());
-					compile(OP_LIMIT, integer(1));
-					compile(OP_GET, nil());
-				}
+//				if (node->index) {
+//					compile(OP_MARK, nil());
+//						if (node->args)
+//							process(scope, node->args, 0, 0, -1);
+//						compile(OP_LIT, node->item);
+//						compile(OP_FIND, nil());
+//						compile(OP_CALL, nil());
+//					compile(OP_LIMIT, integer(1));
+//					compile(OP_GET, nil());
+//				}
 
 				// :fn()
 				if (node->field && node->method) {
